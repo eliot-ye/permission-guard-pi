@@ -1,0 +1,17 @@
+{
+  // Project-local config. DO NOT commit to version control.
+  // Location: <projectRoot>/.pi/local/permission.json
+  //
+  // Priority: local > project > global. This is the highest tier - use it
+  // for machine-specific or developer-specific overrides.
+  //
+  // Permissions: read_write | read_only | unread
+
+  "paths": {
+    // Only on my dev machine: allow the staging creds file.
+    "/Users/eliot/.staging/creds.yaml": "read_only",
+
+    // Only on my dev machine: allow a debug scratchpad.
+    "/tmp/pi-scratch": "read_write"
+  }
+}

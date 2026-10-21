@@ -1,0 +1,15 @@
+schema: spec-driven
+
+context: |
+  Tech stack: TypeScript (ESM, Node 24), 打包为 pi-package（npm 包，`pi-package` keyword）
+  Runtime: pi-coding-agent 通过 jiti 加载 TypeScript 扩展，无编译步骤；不引入 wasm/native 依赖
+  Extensions: 目标 pi 扩展，加载入口 `extensions/index.ts`；pi API 见 `@earendil-works/pi-coding-agent`
+  Conventions:
+    - 代码分层：`src/lib/*.ts`（无 UI/IO 依赖，纯函数，可单元测试）+ `extensions/index.ts`（pi 集成层）
+    - 配置文件：JSONC（JSON + 注释 + 尾逗号），三档：`~/.pi/agent/permission.json` / `<proj>/.pi/permission.json` / `<proj>/.pi/local/permission.json`
+    - 运行时数据：`~/.pi/agent/extensions/@permission-guard/pi/`（trusted.json + logs/）
+    - 开发方法：TDD（RED-GREEN-REFACTOR，测试先于实现）
+    - 测试：`node --experimental-strip-types --test test/`
+  Domain: pi-coding-agent 的文件访问权限控制扩展
+  Design reference: atomgit issue #1517（内部设计参考，不在文档中声明依赖）
+  Package: npm 包名 `@permission-guard/pi`

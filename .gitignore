@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+*.log
+*.tsbuildinfo
+
+# npm local package (regenerated via `npm pack`)
+*.tgz
+
+# Lock file (install from git URL, no npm registry pin)
+package-lock.json
+
+# OS
+.DS_Store
+
+# OpenSpec scratch state (per-agent caching)
+openspec/.td-state/
+openspec/todo.md
+
+# Test temp dirs
+.test-tmp/
+
+# Local pi runtime data (should never be committed)
+.pi/local/

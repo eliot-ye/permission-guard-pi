@@ -1,0 +1,26 @@
+{
+  // User-level config, shared across all projects.
+  // Location: ~/.pi/agent/permission.json
+  //
+  // Priority: local > project > global. This is the lowest tier.
+  // Absolute paths match exactly (not prefix). Use glob `*` to match patterns.
+  //
+  // Permissions: read_write | read_only | unread
+
+  "paths": {
+    // Your SSH keys - allow read/write globally.
+    "~/.ssh": "read_write",
+
+    // AWS creds - allow reads anywhere, writes require approval.
+    "~/.aws": "read_only",
+
+    // Production keys - hard deny everywhere.
+    "/srv/prod-keys": "unread",
+
+    // Shared ops file - allow read/write from any project.
+    "/opt/shared/secrets": "read_write",
+
+    // Log files - readable from anywhere, but not writable.
+    "/var/log/**/*.log": "read_only"
+  }
+}

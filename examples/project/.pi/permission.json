@@ -1,0 +1,27 @@
+{
+  // Project-level config. Commit this to version control if your team
+  // agrees on these rules.
+  // Location: <projectRoot>/.pi/permission.json
+  //
+  // Priority: local > project > global. This tier overrides global.
+  // Relative paths are project-scoped globs - they only match files inside
+  // this project root. Use absolute paths to reach outside.
+  //
+  // Permissions: read_write | read_only | unread
+
+  "paths": {
+    // Never read or write this file - hard deny.
+    "src/secrets.txt": "unread",
+
+    // Allow cert files anywhere under the project tree.
+    // `**/*.pem` matches `c.pem` and `a/b/c.pem` (any depth).
+    "**/*.pem": "read_write",
+
+    // Allow this env file (would otherwise hit the default sensitive
+    // fallback and prompt on every access).
+    "config/.env": "read_write",
+
+    // Read-only vendor dir - agent can read but writes require approval.
+    "vendor/**": "read_only"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@permission-guard/pi",
+  "version": "0.1.0",
+  "description": "Layered, configurable file-access control for pi. Dual region (project_inner / project_outer) x three-tier permissions (read_write / read_only / unread), with session- and persistent-grant memory, audit log, and default-sensitive-path fallback.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "permissions",
+    "safety"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "extensions/index.ts",
+  "files": [
+    "extensions/index.ts",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\" \"extensions/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}
