@@ -156,7 +156,7 @@ type UserChoice = "allow_once" | "allow_session" | "allow_persistent" | "deny";
  * that could mutate state) get `read_write` so that a future stricter
  * decision layer can still gate them.
  */
-function bashPermissionForReason(reason: string | undefined): "read_only" | "read_write" {
+export function bashPermissionForReason(reason: string | undefined): "read_only" | "read_write" {
   // Device redirects, forwarders, command substitution, shell forwarders,
   // and other constructs we flagged as unreliable all imply at worst read
   // access (the extractor chose to treat them as opaque), but "bash -c ..."
@@ -179,6 +179,13 @@ function bashPermissionForReason(reason: string | undefined): "read_only" | "rea
     case "heredoc":
     case "subshell":
       return "read_write";
+    // bash-hardening-round-2 (L3): a compound command that includes `cd`
+    // changes the cwd baseline for subsequent fragments, so the actual file
+    // paths accessed cannot be statically resolved against projectRoot.
+    // Conservatively treat as read_write so a future stricter decision
+    // layer still gates it.
+    case "cd_chdir":
+      return "read_write";
     default:
       // Unknown reason: be conservative.
       return "read_write";
@@ -190,7 +197,7 @@ function bashPermissionForReason(reason: string | undefined): "read_only" | "rea
  * extraction reason gets its own remediation hint so the user sees how to
  * avoid repeating the prompt (spec approval-flow, D5).
  */
-function bashSubtitleForReason(reason: string | undefined): string {
+export function bashSubtitleForReason(reason: string | undefined): string {
   if (reason === "glob_expansion") {
     return "该命令含未加引号的 glob 通配符，无法静态枚举目标文件。如需避免重复弹窗，请在 permission.json 中声明该路径 glob，或选择「会话内允许」";
   }
@@ -204,6 +211,8 @@ function bashSubtitleForReason(reason: string | undefined): string {
       return "该命令通过 shell 转发器执行，字符串内的文件系统访问不可见于静态分析。建议直接执行命令而非嵌套 shell；选择「会话内允许」可避免重复弹窗";
     case "forwarding_command":
       return "该命令使用转发器（xargs/parallel 等），下游参数来自上游 stdout，无法静态枚举。建议避免在管道后使用转发器；选择「会话内允许」可避免重复弹窗";
+    case "cd_chdir":
+      return "该命令包含 cd 命令，改变后续命令的工作目录，无法静态确定实际访问的文件路径。建议使用绝对路径；选择「会话内允许」可避免重复弹窗";
     default:
       return "命令无法静态解析，请审阅整条命令；选择「会话内允许」可避免重复弹窗";
   }

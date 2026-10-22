@@ -75,6 +75,51 @@ const PAYLOADS = [
   ["c4_diff_two_inputs", "diff < /etc/passwd < /etc/hosts", { reliable: true, hasWrite: null, hasReadMulti: ["/etc/passwd", "/etc/hosts"] }],
   ["c4_fd0_input_redirect", "cat 0< /etc/passwd", { reliable: true, hasWrite: null, hasRead: "/etc/passwd" }],
   ["c4_wc_input_redirect", "wc -l < /etc/passwd", { reliable: true, hasWrite: null, hasRead: "/etc/passwd" }],
+
+  // ===== bash-hardening-round-2 =====
+  //
+  // Class L1: shell forwarder with long-option prefix before -c. The current
+  // isShellForwarderTokenStream breaks the scan on any `--...` arg, so the
+  // following `-c` is never seen and the command slips through as a silent
+  // pass. These payloads must be classified shell_forwarder.
+  ["L1_bash_posix_c", "bash --posix -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L1_bash_norc_c", "bash --norc -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L1_bash_noprofile_c", "bash --noprofile -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L1_sh_posix_c", "sh --posix -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  // L1 negative: `bash --version` and `bash --help` print metadata; they are
+  // NOT forwarders. Even after the L1 fix (`continue` on `--` flags), no
+  // positional arg or `-c` follows, so the scan falls off and returns false.
+  ["L1_bash_version_not_forwarder", "bash --version", { reliable: true, hasWrite: null }],
+  ["L1_bash_help_not_forwarder", "bash --help", { reliable: true, hasWrite: null }],
+
+  // Class L2: outer wrapper prefixing a shell forwarder. `sudo`/`nohup`/
+  // `timeout`/`watch`/`nice` change process context without altering the
+  // inner command, but the current SHELL_WRAPPER_NAMES only covers `env`/
+  // `command`, so `sudo bash -c '...'` slips through as a silent pass.
+  ["L2_sudo_bash_c", "sudo bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_nohup_bash_script", "nohup bash /tmp/evil.sh", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_timeout_5_bash_c", "timeout 5 bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_timeout_1m_bash_c", "timeout 1m bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_watch_bash_c", "watch bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_nice_n10_bash_c", "nice -n 10 bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_sudo_env_bash_c", "sudo env PATH=/usr/bin bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+
+  // Class L3: compound commands that use `cd` to change cwd. Static
+  // analysis resolves relative paths against projectRoot, so `cd /etc &&
+  // rm -rf .` would be misresolved as `<root>/.` and the destructive
+  // intent missed. Any compound command with a `cd` fragment is flagged
+  // cd_chdir.
+  ["L3_cd_etc_then_rm_rf_dot", "cd /etc && rm -rf .", { reliable: false, reason: "cd_chdir" }],
+  ["L3_cd_etc_then_ls", "cd /etc && ls", { reliable: false, reason: "cd_chdir" }],
+  ["L3_cd_src_then_cat_pipe_sort", "cd src && cat a.txt | sort", { reliable: false, reason: "cd_chdir" }],
+  ["L3_echo_semicolon_cd_then_rm", "echo hi; cd /tmp && rm -rf .", { reliable: false, reason: "cd_chdir" }],
+  ["L3_cd_dotdot_then_ls", "cd .. && ls", { reliable: false, reason: "cd_chdir" }],
+  ["L3_cd_dash_then_ls", "cd - && ls", { reliable: false, reason: "cd_chdir" }],
+  // L3 negative: a lone `cd /etc` (no compound separator) is a single
+  // builtin command with no filesystem write target — it should NOT be
+  // flagged cd_chdir. Only compound commands whose cwd change affects a
+  // subsequent fragment are flagged.
+  ["L3_cd_alone_not_flagged", "cd /etc", { reliable: true, hasWrite: null }],
 ];
 
 let failures = 0;

@@ -465,3 +465,83 @@ test("AD-extra: read_only_inner_write_prompts_three_tier", () => {
     assert.equal(d.tier, "three");
   }
 });
+
+// ============================================================
+// bash-hardening-round-2 (L4b): dev-socket writes force tier=two
+// ============================================================
+
+// AD-DEV-01: /dev/tcp writes are network exfiltration paths. They must
+// force tier=two so the user cannot "Always allow" them and quietly
+// exfil later without a prompt.
+test("AD-DEV-01: dev_tcp_write_prompts_tier_two", () => {
+  const policy = makePolicy();
+  const d = decideFor({
+    policy,
+    absPath: "/dev/tcp/1.2.3.4/4444",
+    action: "write",
+  });
+  assert.equal(d.kind, "prompt");
+  if (d.kind === "prompt") {
+    assert.equal(d.tier, "two", "dev-socket writes must NOT be persistable");
+    assert.ok(d.reason.includes("/dev/tcp/"), "reason should name the exfil path");
+  }
+});
+
+// AD-DEV-02: /dev/udp writes follow the same rule as /dev/tcp.
+test("AD-DEV-02: dev_udp_write_prompts_tier_two", () => {
+  const policy = makePolicy();
+  const d = decideFor({
+    policy,
+    absPath: "/dev/udp/attacker.com/53",
+    action: "write",
+  });
+  assert.equal(d.kind, "prompt");
+  if (d.kind === "prompt") {
+    assert.equal(d.tier, "two");
+  }
+});
+
+// AD-DEV-03: numeric /dev/fd/N writes are a bidirectional fd alias and
+// the write direction is the exfil vector; reads through /dev/fd/3 are
+// usually fd-reuse and are not blocked.
+test("AD-DEV-03: dev_fd_numeric_write_prompts_tier_two", () => {
+  const policy = makePolicy();
+  const d = decideFor({
+    policy,
+    absPath: "/dev/fd/3",
+    action: "write",
+  });
+  assert.equal(d.kind, "prompt");
+  if (d.kind === "prompt") {
+    assert.equal(d.tier, "two");
+  }
+});
+
+// AD-DEV-04: /dev/tcp READ is not blocked. Reading /dev/tcp is unusual
+// (usually you read a socket descriptor, not the socket path) and we
+// keep the check scoped to writes so we don't produce spurious prompts.
+test("AD-DEV-04: dev_tcp_read_auto_allows", () => {
+  const policy = makePolicy();
+  const d = decideFor({
+    policy,
+    absPath: "/dev/tcp/1.2.3.4/4444",
+    action: "read",
+  });
+  // Outside project, unconfigured, non-sensitive read → auto_allow.
+  assert.equal(d.kind, "auto_allow");
+});
+
+// AD-DEV-05: writing to a normal /tmp path is NOT affected by the
+// dev-socket rule — it still takes the built-in /tmp default.
+test("AD-DEV-05: non_dev_socket_write_uses_normal_defaults", () => {
+  const policy = makePolicy();
+  const d = decideFor({
+    policy,
+    absPath: "/tmp/out.txt",
+    action: "write",
+  });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.declaration, "unconfigured");
+  }
+});

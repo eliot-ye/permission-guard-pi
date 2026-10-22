@@ -2867,8 +2867,35 @@ function isLiteralForLoop(cmd: string, pos: number): {
 // Shell names that, when followed by -c, execute a command from a string.
 const SHELL_NAMES = new Set(["bash", "sh", "dash", "zsh"]);
 
-// Wrapper commands that are env modifiers: they may prefix a shell forwarder.
-const SHELL_WRAPPER_NAMES = new Set(["env", "command"]);
+// Wrapper commands that are env modifiers: they may prefix a shell forwarder
+// (or an unreliable command) without changing the inner command's semantics.
+// - `env`, `command`: classic env modifiers (see skipWrapperTokens docs).
+// - `sudo`: privilege elevation — inner command runs unchanged.
+// - `nohup`: ignore SIGHUP — inner command runs unchanged.
+// - `timeout`: wall-clock limit — takes a duration as a positional arg.
+// - `watch`: periodic loop — inner command runs unchanged.
+// - `nice`: priority adjustment — takes a level via `-n LEVEL`.
+// bash-hardening-round-2 (L2) added the last five: they were previously
+// invisible to both the shell-forwarder guard and the unreliable-command
+// guard, letting `sudo bash -c '...'` / `timeout 5 bash -c '...'` /
+// `nice -n 10 bash -c '...'` slip through as silent passes.
+const SHELL_WRAPPER_NAMES = new Set([
+  "env", "command",
+  "sudo", "nohup", "timeout", "watch", "nice",
+]);
+
+// Duration / priority value-taking flags that skipWrapperTokens must consume
+// an extra token for. Each entry is a wrapperName → set of short flags that
+// take a value. Kept separate from the generic "short flag without value"
+// branch (which does NOT consume the following token) so `timeout 5 bash -c
+// ...` and `nice -n 10 bash -c ...` are not mis-tokenized (L2 sub-task
+// D2.1 in design.md).
+const WRAPPER_VALUE_FLAGS: Record<string, Set<string>> = {
+  // `timeout` duration is a POSITIONAL (not a flag), handled separately.
+  // `nice -n LEVEL` — only `-n` takes a value; the other nice flags (-a, -e,
+  // -i, -m, -N, -p, -r, -w, -W) are value-less.
+  nice: new Set(["-n"]),
+};
 
 /**
  * Skip a wrapper (`env` or `command`) and its argument tokens, returning
@@ -2904,6 +2931,12 @@ const SHELL_WRAPPER_NAMES = new Set(["env", "command"]);
  */
 function skipWrapperTokens(tokens: string[], startIdx: number, wrapperName: string): number {
   const isCommandBuiltin = wrapperName === "command";
+  // `timeout` accepts exactly ONE positional argument before the inner
+  // command (the duration: `5`, `1m`, `1h30m`, ...). We track whether we
+  // have consumed it so the branch fires only once; after that, scanning
+  // resumes the normal path and the next non-flag token IS the command.
+  // (bash-hardening-round-2 L2 D2.1 in design.md.)
+  let consumedTimeoutDuration = false;
   let i = startIdx;
   while (i < tokens.length) {
     const tok = tokens[i];
@@ -2911,6 +2944,20 @@ function skipWrapperTokens(tokens: string[], startIdx: number, wrapperName: stri
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) { i += 1; continue; }
     // Long flag
     if (tok.startsWith("--")) { i += 1; continue; }
+    // `timeout` duration is a POSITIONAL (not a flag) — first non-flag,
+    // non-assignment token right after the wrapper name is consumed as the
+    // duration, then scanning continues to find the inner command. Without
+    // this special-case, `timeout 5 bash -c '...'` would treat `5` as the
+    // inner command and isShellForwarder would miss the bash forwarder.
+    if (
+      wrapperName === "timeout" &&
+      !consumedTimeoutDuration &&
+      !tok.startsWith("-")
+    ) {
+      consumedTimeoutDuration = true;
+      i += 1;
+      continue;
+    }
     // `-v NAME` / `-V NAME` on `command` — consume the name as query target.
     if (isCommandBuiltin && (tok === "-v" || tok === "-V")) {
       i += 2;
@@ -2920,6 +2967,16 @@ function skipWrapperTokens(tokens: string[], startIdx: number, wrapperName: stri
     // (Deliberately excludes -i, -v, -V, -a, -0 which are value-less.)
     if (!isCommandBuiltin &&
         (tok === "-u" || tok === "-C" || tok === "-P" || tok === "-S" || tok === "-I")) {
+      i += 2;
+      continue;
+    }
+    // Wrapper-specific value-taking short flags. Only `nice -n LEVEL` and
+    // `watch -n DELAY` today; both take a duration/level as the next token,
+    // which is NOT the command. Without this, `nice -n 10 bash -c '...'`
+    // would leave `10` as the apparent inner command and miss the forwarder
+    // (L2 D2.1 in design.md).
+    const wrapperValueFlags = WRAPPER_VALUE_FLAGS[wrapperName];
+    if (wrapperValueFlags?.has(tok)) {
       i += 2;
       continue;
     }
@@ -2977,14 +3034,19 @@ function isShellForwarderTokenStream(tokens: string[]): boolean {
       // Look ahead for a `-c` flag OR a non-flag positional (script path).
       // Any positional argument means "execute this file's contents", which
       // is a shell forwarder (bash /tmp/x.sh, bash -x /tmp/x.sh, etc.).
+      // Long flags (`--posix`, `--norc`, `--noprofile`, `--rcfile FILE`,
+      // etc.) are legal bash options that do NOT disable `-c` — the scan
+      // must skip them and keep looking (`bash --posix -c '...'` is
+      // equivalent to `bash -c '...'` in POSIX mode). Breaking on the
+      // first long flag was the L1 bypass in bash-hardening-round-2.
       for (let j = i + 1; j < tokens.length; j++) {
         const arg = tokens[j];
         if (arg === "-c") return true;
         // Option cluster like `-xc`, `-lc`, `-xec`: single `-` followed by
         // letters, one of which is `c`. (bash parses `-xc` as `-x -c`.)
         if (/^-[A-Za-z]*c/.test(arg)) return true;
-        // Long flag like `--version` — not a `-c` trigger, but stops the scan.
-        if (arg.startsWith("--")) break;
+        // Long flag — skip and keep scanning for a following -c.
+        if (arg.startsWith("--")) continue;
         // Positional arg to shell — script path. Trigger forwarder.
         if (arg && !arg.startsWith("-")) return true;
       }
@@ -3008,6 +3070,42 @@ function isShellForwarderTokenStream(tokens: string[]): boolean {
   }
 
   return false;
+}
+
+// -------- `cd` chdir guard (bash-hardening-round-2 L3) --------
+
+// Detect compound commands whose `cd` builtin would silently change cwd for
+// subsequent fragments. Static analysis resolves every relative path
+// against projectRoot, so `cd /etc && rm -rf .` would be misinterpreted as
+// deleting `<projectRoot>/.` when the shell would actually delete `/etc`.
+//
+// Semantics:
+//   - Runs AFTER `scanUnreliable` / `scanControlFlow` (they catch more
+//     general constructs first) and BEFORE `isShellForwarder` (both are
+//     unrelated constructs — order doesn't matter for correctness, but
+//     `cd_chdir` is more specific so it wins on reason reporting).
+//   - Only fires on COMPOUND commands (≥ 2 fragments after splitting on
+//     `;` / `&&` / `||` / `&` / `\n`). A lone `cd /etc` (no separator)
+//     has no downstream fragment whose path resolution is affected and
+//     must NOT be flagged.
+//   - Fires when ANY fragment's leading token (basename, path prefix
+//     stripped) is `cd` — matching how bash's `cd` builtin appears in
+//     real usage. Absolute paths (`/usr/bin/cd`) are matched by
+//     basename for consistency with `getStageCommandName` / `isShellForwarder`.
+//
+// Returns `"cd_chdir"` when the guard fires, otherwise `undefined`.
+function scanCdChdir(cmd: string): string | undefined {
+  const fragments = splitCommands(cmd);
+  if (fragments.length < 2) return undefined;
+  for (const frag of fragments) {
+    const trimmed = frag.trim();
+    if (!trimmed) continue;
+    const tokens = tokenize(trimmed);
+    if (tokens.length === 0) continue;
+    const firstBase = tokens[0].split("/").pop()!;
+    if (firstBase === "cd") return "cd_chdir";
+  }
+  return undefined;
 }
 
 // -------- Main extraction --------
@@ -3043,6 +3141,16 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
   const cfResult = scanControlFlow(rawCommand, projectRoot);
   if (cfResult.hit) {
     return { reliable: false, rawCommand, reason: "control_flow" };
+  }
+
+  // 2b. `cd` chdir guard (bash-hardening-round-2 L3): any compound command
+  // whose fragment starts with `cd` cannot have its relative-path targets
+  // resolved statically, because `cd` changes the cwd baseline for all
+  // downstream fragments. Runs BEFORE `isShellForwarder` so a `cd` command
+  // that also contains `bash -c` reports `cd_chdir` (the more specific
+  // reason) rather than `shell_forwarder`. A lone `cd /etc` is exempt.
+  if (scanCdChdir(rawCommand) === "cd_chdir") {
+    return { reliable: false, rawCommand, reason: "cd_chdir" };
   }
 
   // 3. Shell-forwarder guard: `bash -c "..."` etc. run a command from a string

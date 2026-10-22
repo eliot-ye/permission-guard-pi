@@ -16,6 +16,7 @@
 
 import type { MergedPolicy, MatchedEntry, Permission } from "./config.ts";
 import type { SensitiveRule } from "./sensitive.ts";
+import { isDevSocketOrFd } from "./bash-extract.ts";
 
 export type Action = "read" | "write" | "delete";
 export type Region = "project_inner" | "project_outer";
@@ -134,6 +135,28 @@ export function decide(opts: {
 
   // 2. No table entry. Fall back to region + sensitivity defaults.
   const configured = false;
+
+  // 2a. Network-exfiltration guard (bash-hardening-round-2 L4b): writes to
+  // bash dev-sockets (`/dev/tcp/HOST/PORT`, `/dev/udp/HOST/PORT`) or a
+  // numeric fd alias (`/dev/fd/[0-9]+`) are network-exfiltration paths.
+  // They must be forced to tier=two (no "Always allow") so a subsequent
+  // write to the same path cannot be persisted as a grant. READs on the
+  // same paths are not blocked (unusual but not the exfil vector) and go
+  // through the normal non-sensitive flow below.
+  // Runs BEFORE the sensitive fallback (2b) because dev-sockets are
+  // protocol channels, not files — they do not match sensitive.ts rules,
+  // so ordering only matters for clarity. Explicit user config declarations
+  // (step 1) still take precedence.
+  if (action === "write" && isDevSocketOrFd(absPath)) {
+    return {
+      kind: "prompt",
+      region,
+      declaration: "unconfigured",
+      configured: false,
+      tier: "two",
+      reason: `Network exfiltration path: ${absPath}`,
+    };
+  }
 
   // 2b. Sensitive-path fallback (both inner and outer, split by tier).
   //   - Inner sensitive: prompt tier=three - user gets a chance to persist

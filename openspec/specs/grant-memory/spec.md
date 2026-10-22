@@ -149,7 +149,7 @@
 
 - **基于命令不可靠类型的授权类型映射**
   - `reason: "glob_expansion"` 或 `reason: "unresolved variable: ..."` → 授权为 `read_only`
-  - `reason: "control_flow"` 或 `reason: "shell_forwarder"` 或 `reason: "forwarding_command"` → 授权为 `read_write`（这类命令可能访问任意路径，属更高风险）
+  - `reason: "control_flow"` 或 `reason: "shell_forwarder"` 或 `reason: "forwarding_command"` 或 `reason: "cd_chdir"` → 授权为 `read_write`（这类命令可能访问任意路径，属更高风险）
 - **用户选择的权限**：如 tier=three prompt（权限声明路径）用户选择 `read_write` / `read_only` 时，Bash 命令授权使用该权限；如 tier=two prompt（无权限声明）则使用上文映射的授权类型
 
 **审计日志字段扩展**：
@@ -176,13 +176,20 @@
 
 #### Scenario: 其他类型 bash 命令（控制流 + shell 转发器）授权为 read_write
 
-- **WHEN** bash 命令为 `bash -c "rm -rf /etc/passwd"`，extractBashTargets 返回 `reason: "shell_forwarder"`
+- **WHEN** bash 命令为 `bash -c "rm -rf /etc/passwd"`（`reason: "shell_forwarder"`）、`find /etc | xargs rm`（`reason: "forwarding_command"`）、`while read x; do cat $x; done`（`reason: "control_flow"`）、或 `cd /etc && rm -rf .`（`reason: "cd_chdir"`）
 - **THEN** 用户选择"允许一次/会话/总是允许"时，Bash 命令授权的 permission 为 `read_write`（更严格），避免对这类高风险命令放行过多
 
 #### Scenario: audit 日志区分 path vs bash 授权
 
 - **WHEN** 用户授权一个路径 `/etc/passwd` 和一个 bash 命令 `cat /etc/passwd`，记录时日志中 `grant_type` 分别为 `path` / `bash`
 - **THEN** 审计消费者可以区分用户对具体路径的授权与对具体命令的授权，便于安全分析
+
+#### Scenario: cd cwd 变更命令授权为 read_write
+
+- **WHEN** bash 命令为 `cd /etc && rm -rf .`，`extractBashTargets` 返回 `reason: "cd_chdir"`，用户选择"允许为本会话"
+- **THEN** 
+  - 会话级 Bash 命令记忆中写入 `{projectHash, commandHash, sessionTag, permission: read_write, createdAt}`
+  - audit 日志含 `event: "allow_session", grant_type: "bash"`，`reason: "cd_chdir"`
 
 ### Requirement: trusted.json 文件与目录权限
 

@@ -85,6 +85,45 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
     },
     reason: "Credential config",
   },
+  {
+    // bash-hardening-round-2 (L4a): system credential/config files under /etc.
+    // These are common Unix privilege-escalation / lateral-movement entry
+    // points — leaking /etc/shadow or /etc/sudoers enables password-hash
+    // extraction, sudo rule tampering, and cron-driven persistence.
+    //
+    // Matching is deliberately EXACT on basename + directory prefix:
+    //   - /etc/shadow, /etc/sudoers, /etc/master.passwd: exact basename
+    //     (the master.passwd variant is macOS's password hash file).
+    //   - /etc/crontab + /etc/cron.{d,hourly,daily,weekly,monthly}/*: cron
+    //     scheduling configuration. Matched via dirname prefix.
+    //   - /etc/hosts.allow, /etc/hosts.deny: TCP Wrappers access-control
+    //     configuration. Exact basename match.
+    //
+    // NOT included: /etc/passwd, /etc/hosts, /etc/hostname, /etc/group,
+    // /etc/nsswitch.conf — these are public system configuration. Adding
+    // them would produce noise without a security gain.
+    test: (p) => {
+      const b = basename(p).toLowerCase();
+      const d = dirname(p).toLowerCase();
+      const etcDirs = [
+        "/etc/cron.d",
+        "/etc/cron.hourly",
+        "/etc/cron.daily",
+        "/etc/cron.weekly",
+        "/etc/cron.monthly",
+      ];
+      return (
+        b === "shadow" ||
+        b === "sudoers" ||
+        b === "master.passwd" ||
+        b === "crontab" ||
+        b === "hosts.allow" ||
+        b === "hosts.deny" ||
+        etcDirs.some((prefix) => d === prefix || d.startsWith(prefix + "/"))
+      );
+    },
+    reason: "System credential/config file",
+  },
 ];
 
 export function findSensitiveMatch(p: string): SensitiveRule | undefined {

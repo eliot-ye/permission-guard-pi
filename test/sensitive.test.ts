@@ -68,3 +68,45 @@ test("sensitive: multiple rules exist", () => {
   // Sanity check the default ruleset size
   assert.ok(DEFAULT_SENSITIVE_RULES.length >= 4, "expected at least 4 rule families");
 });
+
+// ============================================================
+// bash-hardening-round-2: system credential/config file rule
+// ============================================================
+
+test("SENS-SYS-01: system_credential_files_sensitive", () => {
+  // L4a: system credential/config files under /etc are sensitive by default.
+  // These are common Unix privilege-escalation / lateral-movement entry points.
+  const sensitive = [
+    "/etc/shadow",
+    "/etc/sudoers",
+    "/etc/master.passwd",
+    "/etc/crontab",
+    "/etc/cron.d/myjob",
+    "/etc/hosts.allow",
+  ];
+  for (const p of sensitive) {
+    const m = findSensitiveMatch(p);
+    assert.ok(m, `${p} should be flagged sensitive`);
+    assert.equal(
+      m?.reason,
+      "System credential/config file",
+      `${p} should carry the system credential/config reason`,
+    );
+  }
+});
+
+test("SENS-SYS-07: etc_passwd_and_public_etc_files_not_sensitive", () => {
+  // /etc/passwd holds public user list (name/UID/GID/home/shell) — NOT
+  // sensitive. Same for /etc/hosts, /etc/hostname, /etc/group,
+  // /etc/nsswitch.conf — they are public system configuration.
+  const notSensitive = [
+    "/etc/passwd",
+    "/etc/hosts",
+    "/etc/hostname",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+  ];
+  for (const p of notSensitive) {
+    assert.equal(findSensitiveMatch(p), undefined, `${p} must NOT be flagged sensitive`);
+  }
+});

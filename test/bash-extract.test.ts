@@ -605,10 +605,20 @@ test("BTP-audit-97: shell_command_substitution_still_triggers_prompt", () => {
 });
 
 // Real audit #102: npm test | grep ... | tail (with no $(...)) → SHOULD be silent.
-test("BTP-audit-102: npm_test_pipe_chain_is_silent", () => {
+// bash-hardening-round-2 L3: the compound command now starts with `cd /proj`,
+// so static analysis of the relative paths in the downstream pipeline is not
+// safe — `cd /proj && npm test | grep ... | tail` reports `cd_chdir` rather
+// than silently extracting the pipeline's downstream targets. This is the
+// intentional UX narrowing documented in proposal.md caller-impact analysis
+// (BTP-audit-102: "现按 L3 新规则应判 cd_chdir unreliable, 原断言 reliable:
+// true 需改为 reliable: false；这是有意的 UX 收窄, 不是 bug").
+test("BTP-audit-102: npm_test_pipe_chain_cd_triggers_cd_chdir", () => {
   const cmd = `cd /proj && npm test 2>&1 | grep -E "^ *[✓✖]|pass|fail" | tail -20`;
   const r = extractBashTargets(cmd, "/proj");
-  assert.equal(r.reliable, true);
+  assert.equal(r.reliable, false, "compound cd fragment now flags cd_chdir");
+  if (!r.reliable) {
+    assert.equal(r.reason, "cd_chdir");
+  }
 });
 
 // Real audit #17: grep -rn "..." /path/*.md | head — the `*.md` glob is
