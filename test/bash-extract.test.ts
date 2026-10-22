@@ -1758,6 +1758,77 @@ test("BMG96: for-loop iteration-set with literal words still goes through litera
   assert.equal(r.reliable, true);
 });
 
+// --- BT-S21..BT-S24: for-loop iteration-set glob with empty prefix (empty-prefix-for-glob-readonly) ---
+//
+// These tests cover the empty-prefix relaxation for for-loop iteration-set
+// globs. `for x in *.log; do wc -l "$x"; done` has an empty prefix (the
+// glob is the entire iteration word) and is relative (not `/`, `~`, or a
+// Windows drive letter) — under the cwd == projectRoot assumption, the
+// shell expands `*.log` inside projectRoot, so it is bounded-safe.
+//
+// Non-empty prefixes already go through isBoundedPrefix (BMG88-96 cover
+// the non-empty cases). Absolute prefixes (`/etc/*.conf`, `~/*.conf`) and
+// write bodies (`rm`) remain rejected.
+
+test("BT-S21: for-loop iteration-set glob empty prefix + read-only wc body is reliable", () => {
+  // The user's original case: `for x in *.log; do wc -l "$x"; done`.
+  // Empty prefix (glob is the whole iteration word) + relative word +
+  // read-only body → bounded-safe under cwd == projectRoot assumption.
+  const r = extractBashTargets(`for x in *.log; do wc -l "$x"; done`, PROJ);
+  assert.equal(r.reliable, true);
+});
+
+test("BT-S22: for-loop iteration-set glob empty prefix + write body is unreliable", () => {
+  // Body is `rm` — write command, isForBodyReadOnly returns false.
+  // Empty-prefix relaxation does not apply to write bodies.
+  const r = extractBashTargets(`for x in *.log; do rm "$x"; done`, PROJ);
+  assert.equal(r.reliable, false);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BT-S23: for-loop iteration-set glob absolute prefix is unreliable", () => {
+  // Empty prefix, but iteration word starts with `/` — absolute path,
+  // cannot be bounded to projectRoot. Empty-prefix relaxation checks the
+  // first char and rejects `/`.
+  const r = extractBashTargets(`for f in /etc/*.conf; do cat "$f"; done`, PROJ);
+  assert.equal(r.reliable, false);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BT-S24: for-loop iteration-set glob home prefix is unreliable", () => {
+  // Empty prefix, but iteration word starts with `~` — home-relative path,
+  // expands outside projectRoot. isBoundedPrefix rejects `~` prefix.
+  const r = extractBashTargets(`for f in ~/*.conf; do cat "$f"; done`, PROJ);
+  assert.equal(r.reliable, false);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BT-S25: for-loop iteration-set glob Windows drive letter prefix is unreliable", () => {
+  // Empty prefix, but iteration word starts with a Windows drive letter
+  // (`C:`) — absolute path on Windows, expands outside projectRoot.
+  // isBoundedPrefix rejects `C:/` prefix (toAbsolutePath resolves it outside
+  // projectRoot, isInside returns false). Pins the Windows drive-letter
+  // rejection path so a future change to toAbsolutePath doesn't silently
+  // bypass it.
+  const r = extractBashTargets(`for f in C:/*.conf; do cat "$f"; done`, PROJ);
+  assert.equal(r.reliable, false);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BT-S24b: for-loop iteration-set glob empty prefix + cat body is reliable", () => {
+  // Second read-only body form: `cat` is in READ_ONLY_COMMANDS.
+  const r = extractBashTargets(`for x in *.ts; do cat "$x"; done`, PROJ);
+  assert.equal(r.reliable, true);
+});
+
+test("BT-S24c: for-loop iteration-set glob non-empty prefix + relative word still reliable", () => {
+  // `./` prefix is non-empty and relative — already covered by BMG88-96
+  // semantics (non-empty prefix goes through isBoundedPrefix). This test
+  // pins the boundary between empty-prefix and non-empty-prefix paths.
+  const r = extractBashTargets(`for x in ./*.log; do wc -l "$x"; done`, PROJ);
+  assert.equal(r.reliable, true);
+});
+
 // ============================================================
 // Phase 1 (bash-stage-b-security-fixes): helper tests for
 // isSilentCommand, UNRELIABLE_COMMANDS, isAnyUnreliableCommand,

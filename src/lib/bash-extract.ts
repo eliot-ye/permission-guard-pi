@@ -604,6 +604,14 @@ function isForLoopIterationGlobExempt(
   // (which wouldn't be an unquoted glob, so we wouldn't be here).
   const prefix = cmd.slice(tokenStart, globPos);
 
+  // Empty prefix: glob is the entire iteration word (e.g. `*.log`, `*`).
+  // Under the cwd == projectRoot assumption, the shell expands such a glob
+  // inside projectRoot, so it is bounded-safe. Absolute and home paths
+  // (e.g. `/etc/*.conf`, `~/*.conf`, `C:/*.conf`) have non-empty prefixes
+  // (tokenStart < globPos) and are rejected by isBoundedPrefix below — they
+  // never reach this branch.
+  if (!prefix) return true;
+
   // Check prefix is inside projectRoot.
   if (!isBoundedPrefix(prefix, projectRoot)) return false;
 
@@ -2517,7 +2525,7 @@ function isGlobForLoopExempt(
   const info = parseGlobForLoop(cmd, pos);
   if (!info) return false;
   if (!info.iterHasGlob) return false;
-  if (!info.globPrefixes.every(p => isBoundedPrefix(p, projectRoot))) return false;
+  if (!info.globPrefixes.every(p => p === "" || isBoundedPrefix(p, projectRoot))) return false;
   if (!isForBodyReadOnly(info.body)) return false;
   return true;
 }

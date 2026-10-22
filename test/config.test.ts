@@ -230,3 +230,97 @@ test("cross-source: read_only vs read_write flagged as conflict (metadata) but n
   // But no unread involved
   assert.equal(entry.conflictInvolvesUnread, false);
 });
+
+// -------- PC16-PC23: tool+pattern rules --------
+
+test("PC16: config_with_rules_parses_correctly", () => {
+  const global: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "allow" }],
+  };
+  const { policy } = mergePolicies(global, {}, {}, "/proj");
+  const match = policy.resolveRule("bash", "git status");
+  assert.ok(match);
+  assert.equal(match.action, "allow");
+  assert.equal(match.source, "global");
+});
+
+test("PC17: rule_without_pattern_matches_all_calls_of_tool", () => {
+  const global: RawConfig = {
+    rules: [{ tool: "bash", action: "deny" }],
+  };
+  const { policy } = mergePolicies(global, {}, {}, "/proj");
+  const match = policy.resolveRule("bash", "any command");
+  assert.ok(match);
+  assert.equal(match.action, "deny");
+});
+
+test("PC18: missing_rules_field_treated_as_empty", () => {
+  const global: RawConfig = { paths: { "/x": "read_write" } };
+  const { policy } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(policy.resolveRule("bash", "git status"), undefined);
+  assert.equal(policy.resolveRule("read", "/etc/passwd"), undefined);
+});
+
+test("PC19: invalid_action_value_skipped_with_warning", () => {
+  const global: RawConfig = {
+    rules: [{ tool: "bash", action: "maybe" as any }],
+  };
+  const { warnings, policy } = mergePolicies(global, {}, {}, "/proj");
+  assert.ok(warnings.some((w) => w.includes("maybe")));
+  assert.equal(policy.resolveRule("bash", "git status"), undefined);
+});
+
+test("PC20: local_rule_overrides_project_rule", () => {
+  const project: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "allow" }],
+  };
+  const local: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "deny" }],
+  };
+  const { policy } = mergePolicies({}, project, local, "/proj");
+  const match = policy.resolveRule("bash", "git push");
+  assert.ok(match);
+  assert.equal(match.action, "deny");
+  assert.equal(match.source, "local");
+});
+
+test("PC21: deny_wins_over_allow_across_sources", () => {
+  const global: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "allow" }],
+  };
+  const project: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "deny" }],
+  };
+  const { policy } = mergePolicies(global, project, {}, "/proj");
+  const match = policy.resolveRule("bash", "git push");
+  assert.ok(match);
+  assert.equal(match.action, "deny");
+});
+
+test("PC22: no_matching_rule_returns_undefined", () => {
+  const global: RawConfig = {
+    rules: [{ tool: "bash", pattern: "git *", action: "allow" }],
+  };
+  const { policy } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(policy.resolveRule("bash", "rm -rf /"), undefined);
+});
+
+test("PC23: pattern_matching_semantics", () => {
+  const global: RawConfig = {
+    rules: [
+      { tool: "bash", pattern: "git *", action: "allow" },
+      { tool: "read", pattern: "/tmp/**", action: "allow" },
+    ],
+  };
+  const { policy } = mergePolicies(global, {}, {}, "/proj");
+  // git * matches git status
+  assert.ok(policy.resolveRule("bash", "git status"));
+  // git * does not match rm -rf
+  assert.equal(policy.resolveRule("bash", "rm -rf /"), undefined);
+  // whitespace normalization: git  status matches git status pattern
+  assert.ok(policy.resolveRule("bash", "git  status"));
+  // file tool pattern matches path
+  assert.ok(policy.resolveRule("read", "/tmp/app/deep.log"));
+  // read pattern does not match bash command
+  assert.equal(policy.resolveRule("read", "git status"), undefined);
+});

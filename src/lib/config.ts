@@ -25,6 +25,7 @@ import { expandHome, toAbsolutePath, toKeyPath, matchesGlob } from "./path-utils
 export type Permission = "read_write" | "read_only" | "unread";
 export type Source = "local" | "project" | "global";
 export type Region = "project_inner" | "project_outer";
+export type RuleAction = "allow" | "deny";
 
 export interface PathEntry {
   pattern: string;
@@ -35,6 +36,22 @@ export interface PathEntry {
   // Original pattern as written in config (for UI display).
   raw: string;
   permission: Permission;
+  source: Source;
+}
+
+export interface RuleEntry {
+  tool: string;
+  pattern: string | undefined;
+  isGlob: boolean;
+  action: RuleAction;
+  raw: string;
+  source: Source;
+}
+
+export interface RuleMatch {
+  tool: string;
+  pattern: string | undefined;
+  action: RuleAction;
   source: Source;
 }
 
@@ -54,15 +71,19 @@ export interface MatchedEntry {
 
 export interface RawConfig {
   paths?: Record<string, string>;
+  rules?: Array<{ tool: string; pattern?: string; action: string }>;
 }
 
 export interface MergedPolicy {
   allEntries: PathEntry[];
+  allRules: RuleEntry[];
   resolve: (absolutePath: string) => MatchedEntry | undefined;
+  resolveRule: (toolName: string, toolPattern: string) => RuleMatch | undefined;
   isDeclared: (absolutePath: string) => boolean;
 }
 
 const VALID_PERMISSIONS = new Set<Permission>(["read_write", "read_only", "unread"]);
+const VALID_RULE_ACTIONS = new Set<RuleAction>(["allow", "deny"]);
 
 // -------- JSONC parsing --------
 
@@ -165,6 +186,7 @@ export function mergePolicies(
 ): { policy: MergedPolicy; warnings: string[] } {
   const warnings: string[] = [];
   const allEntries: PathEntry[] = [];
+  const allRules: RuleEntry[] = [];
 
   const addEntries = (raw: RawConfig, source: Source) => {
     const paths = raw.paths ?? {};
@@ -188,16 +210,46 @@ export function mergePolicies(
     }
   };
 
+  const addRules = (raw: RawConfig, source: Source) => {
+    const rules = raw.rules ?? [];
+    for (const rule of rules) {
+      const action = rule.action as RuleAction;
+      if (!VALID_RULE_ACTIONS.has(action)) {
+        warnings.push(
+          `Unknown rule action '${rule.action}' for tool '${rule.tool}' in ${source} - ignored`,
+        );
+        continue;
+      }
+      const isGlob = rule.pattern ? /\*|\?|\[/.test(rule.pattern) : false;
+      allRules.push({
+        tool: rule.tool,
+        pattern: rule.pattern,
+        isGlob,
+        action,
+        raw: rule.tool + (rule.pattern ? `(${rule.pattern})` : ""),
+        source,
+      });
+    }
+  };
+
   // Add in ascending priority order (global first, local last), so later entries
   // with the same pattern can override earlier ones when we resolve.
   addEntries(globalRaw, "global");
   addEntries(projectRaw, "project");
   addEntries(localRaw, "local");
 
+  addRules(globalRaw, "global");
+  addRules(projectRaw, "project");
+  addRules(localRaw, "local");
+
+  // Normalize whitespace in a bash command for pattern matching.
+  const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();
+
   return {
     policy: (() => {
       const p: MergedPolicy = {
         allEntries,
+        allRules,
         resolve: (absolutePath: string) => {
           const abs = toKeyPath(absolutePath);
           const matched: PathEntry[] = [];
@@ -239,6 +291,45 @@ export function mergePolicies(
             source: winner.source,
             conflict,
             conflictInvolvesUnread,
+          };
+        },
+        resolveRule: (toolName: string, toolPattern: string) => {
+          const toolLower = toolName.toLowerCase().replace(/_/g, "");
+          const patternNorm = normalizeWhitespace(toolPattern);
+          const matched: RuleEntry[] = [];
+          for (const rule of allRules) {
+            if (rule.tool.toLowerCase().replace(/_/g, "") !== toolLower) continue;
+            if (rule.pattern === undefined) {
+              matched.push(rule);
+              continue;
+            }
+            // Pattern matching: * matches any run of characters including / and space
+            if (rule.isGlob) {
+              // Convert glob pattern to regex: * matches anything
+              const regex = new RegExp(
+                "^" + rule.pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$",
+                "s",
+              );
+              if (regex.test(patternNorm)) matched.push(rule);
+            } else {
+              if (normalizeWhitespace(rule.pattern) === patternNorm) matched.push(rule);
+            }
+          }
+          if (matched.length === 0) return undefined;
+
+          // Sort: deny first, then by source priority (local > project > global)
+          matched.sort((a, b) => {
+            // deny wins over allow
+            if (a.action !== b.action) return a.action === "deny" ? -1 : 1;
+            return SOURCE_PRIORITY[b.source] - SOURCE_PRIORITY[a.source];
+          });
+
+          const winner = matched[0];
+          return {
+            tool: winner.tool,
+            pattern: winner.pattern,
+            action: winner.action,
+            source: winner.source,
           };
         },
         isDeclared: (absolutePath: string) => {

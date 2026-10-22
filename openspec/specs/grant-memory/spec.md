@@ -141,21 +141,26 @@
 
 2. 当用户在 tier=two 的 bash 命令 prompt 中选择**"总是允许"**时，写入持久化 memory 中的 Bash 命令 memory，并 auto‑allow 跨会话相同 `rawCommand`，弹窗 UI 须显示持久化文件路径（与 path‑level 持久化统一）
 
+3. **allow 规则命中的命令不写入记忆**：当 bash 命令被 allow 规则匹配并 auto‑allow 时，不写入 Bash 命令记忆（无需记忆，规则已持久授权）
+
+4. **deny 规则命中的命令不写入记忆**：当 bash 命令被 deny 规则匹配并 deny_hard 时，不写入 Bash 命令记忆（永远不可放行）
+
 **查询逻辑**：
 
-- 在 **extension 层**，当收到 bash 命令时，首先查询 **核心 path‑level 授权**（`hasGrant(projectHash, action, absPath)`），再查询 **Bash 命令授权**（`hasBashSessionGrant(projectHash, commandHash, sessionTag)` 和 `hasBashPersistentGrant(projectHash, commandHash)`）。任一授权命中即 auto‑allow 并**跳过决策引擎**，如常规授权那样记录 audit 日志。
+- 在 **extension 层**，当收到 bash 命令时，首先查询 **核心 path‑level 授权**（`hasGrant(projectHash, action, absPath)`），再查询 **Bash 命令授权**（`hasBashSessionGrant(projectHash, commandHash, sessionTag)` 和 `hasBashPersistentGrant(projectHash, commandHash)`），最后查询 **tool+pattern 规则**（`resolveRule("bash", rawCommand)`）。任一击中即 auto‑allow 并**跳过决策引擎**，如常规授权那样记录 audit 日志。
 
 **授权类型映射**：
 
 - **基于命令不可靠类型的授权类型映射**
-  - `reason: "glob_expansion"` 或 `reason: "unresolved variable: ..."` → 授权为 `read_only`
+  - `reason: "glob_expansion"` 或 `reason: "unresolved variable: ..."`` → 授权为 `read_only`
   - `reason: "control_flow"` 或 `reason: "shell_forwarder"` 或 `reason: "forwarding_command"` 或 `reason: "cd_chdir"` → 授权为 `read_write`（这类命令可能访问任意路径，属更高风险）
 - **用户选择的权限**：如 tier=three prompt（权限声明路径）用户选择 `read_write` / `read_only` 时，Bash 命令授权使用该权限；如 tier=two prompt（无权限声明）则使用上文映射的授权类型
 
 **审计日志字段扩展**：
 
-- 新增 `grant_type` 字段，区分 `path` / `bash`
+- 新增 `grant_type` 字段，区分 `path` / `bash` / `rule`
 - Bash 类型日志中加入 `commandHash` 和 `reason`
+- Rule 类型日志中加入 `tool`、`pattern` 和 `action`
 
 #### Scenario: 会话内允许特定 bash 命令
 
@@ -178,6 +183,16 @@
 
 - **WHEN** bash 命令为 `bash -c "rm -rf /etc/passwd"`（`reason: "shell_forwarder"`）、`find /etc | xargs rm`（`reason: "forwarding_command"`）、`while read x; do cat $x; done`（`reason: "control_flow"`）、或 `cd /etc && rm -rf .`（`reason: "cd_chdir"`）
 - **THEN** 用户选择"允许一次/会话/总是允许"时，Bash 命令授权的 permission 为 `read_write`（更严格），避免对这类高风险命令放行过多
+
+#### Scenario: allow 规则命中的命令不写入记忆
+
+- **WHEN** 配置声明 `{ "tool": "bash", "pattern": "git *", "action": "allow" }`，bash 命令为 `git status`
+- **THEN** 决策为 auto_allow，不写入 Bash 命令记忆，audit 日志 `grant_type: "rule"`
+
+#### Scenario: deny 规则命中的命令不写入记忆
+
+- **WHEN** 配置声明 `{ "tool": "bash", "pattern": "rm *", "action": "deny" }`，bash 命令为 `rm -rf /`
+- **THEN** 决策为 deny_hard，不写入 Bash 命令记忆，audit 日志 `grant_type: "rule"`
 
 #### Scenario: audit 日志区分 path vs bash 授权
 

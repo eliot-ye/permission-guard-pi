@@ -57,9 +57,26 @@ export function decide(opts: {
   action: Action;
   isInside: boolean;
   sensitive: SensitiveRule | undefined;
+  toolName?: string;
+  toolPattern?: string;
 }): Decision {
-  const { policy, absPath, action, isInside, sensitive } = opts;
+  const { policy, absPath, action, isInside, sensitive, toolName, toolPattern } = opts;
   const region: Region = isInside ? "project_inner" : "project_outer";
+
+  // 0. Deny rules check (highest priority - before any other check).
+  if (toolName && toolPattern) {
+    const ruleMatch = policy.resolveRule(toolName, toolPattern);
+    if (ruleMatch && ruleMatch.action === "deny") {
+      return {
+        kind: "deny_hard",
+        region,
+        declaration: "unconfigured",
+        configured: false,
+        reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
+        denial: { reason: `Rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source} denies this ${toolName} call` },
+      };
+    }
+  }
 
   // 1. If a table entry declares this path.
   const entry = policy.resolve(absPath);
@@ -135,6 +152,23 @@ export function decide(opts: {
 
   // 2. No table entry. Fall back to region + sensitivity defaults.
   const configured = false;
+
+  // 2a-pre. Allow rules check (before dev-socket and sensitive checks).
+  // Allow rules skip the prompt for non-sensitive paths. For sensitive paths,
+  // we skip the allow and fall through to the sensitive check (2b) so the
+  // sensitive hard floor still applies.
+  if (toolName && toolPattern && !sensitive) {
+    const ruleMatch = policy.resolveRule(toolName, toolPattern);
+    if (ruleMatch && ruleMatch.action === "allow") {
+      return {
+        kind: "auto_allow",
+        region,
+        declaration: "unconfigured",
+        configured: false,
+        reason: `Allowed by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
+      };
+    }
+  }
 
   // 2a. Network-exfiltration guard (bash-hardening-round-2 L4b): writes to
   // bash dev-sockets (`/dev/tcp/HOST/PORT`, `/dev/udp/HOST/PORT`) or a

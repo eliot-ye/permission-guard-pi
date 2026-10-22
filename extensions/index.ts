@@ -347,7 +347,7 @@ const BASH_GUARDRAILS: string[] = [
     "`go vet`, `go test`",
   "- In-project read-only glob (auto-allowed): `ls openspec/*`, " +
     "`find . -name '*.ts'`, `cat src/a.ts`, `wc -l src/*.ts`, " +
-    "`git log src/`",
+    "`git log src/`, `for x in *.log; do wc -l \"$x\"; done`",
   "- Dev-tool read-only forms (silent): `git status/diff/log/show`, " +
     "`npm test/check`, `cargo check/test`, `tsc --noEmit`, " +
     "`go vet/test`, `rg`, `jq`, `head`/`tail`/`wc`/`stat` on project paths",
@@ -362,7 +362,9 @@ const BASH_GUARDRAILS: string[] = [
   "- Command / process / heredoc substitution: `$(...)`, backtick, " +
     "`<(...)`, `<<EOF` → inline the value or write a small script file first",
   "- Control-flow as standalone tokens: `while`, `for`, `until`, `if`, " +
-    "`case` (esp. `for x in *.log; do ...`) → replace with `grep`/`find`/`rg`",
+    "`case` (esp. `for x in /etc/*.conf; do ...` with absolute prefix, or " +
+    "`for x in *.log; do rm \"$x\"; done` with write body) → replace with " +
+    "`grep`/`find`/`rg` for read-only relative-prefix loops",
   "- Unquoted globs outside project, OR in write/delete commands " +
     "(`rm -rf /tmp/*.log`, `find /etc | xargs rm`) → quote them, use " +
     "project-scoped globs, or use `grep`/`find` tool",
@@ -533,6 +535,25 @@ export function registerPermissionGate(
     }
 
     if (!extraction.reliable) {
+      // Check deny rules for unreliable bash commands (deny takes precedence).
+      const ruleMatch = state.policy.resolveRule("bash", command);
+      if (ruleMatch && ruleMatch.action === "deny") {
+        state.audit.log({
+          event: "hard_deny",
+          tool: "bash",
+          project: state.projectHash,
+          projectRoot: state.projectRoot,
+          path: null,
+          command,
+          region: "project_outer",
+          declaration: "unconfigured",
+          permission: null,
+          toolCallId: event.toolCallId,
+          note: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
+        });
+        return { block: true, reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"})` };
+      }
+
       // Tier=two prompt showing the raw command.
       // Action unknown (unreliable extraction), so we use "write" as the
       // conservative default for any session/persistent grant - this is safe
@@ -569,9 +590,9 @@ export function registerPermissionGate(
       // Check both the target path and its realpath; take the stricter.
       // macOS rewrites /etc/hosts to /private/etc/hosts, but configs
       // typically reference the canonical form.
-      let decision = await decideTarget(state, target.path, target.action);
+      let decision = await decideTarget(state, target.path, target.action, "bash", command);
       if (target.path !== resolvedPath) {
-        const altDecision = await decideTarget(state, resolvedPath, target.action);
+        const altDecision = await decideTarget(state, resolvedPath, target.action, "bash", command);
         if (severity(altDecision) > severity(decision)) {
           decision = altDecision;
         }
@@ -618,9 +639,9 @@ export function registerPermissionGate(
     const absPath = await resolveToAbsolute(expandedInput, state.projectRoot);
     const action = event.toolName === "read" ? "read" : "write";
 
-    let decision = await decideTarget(state, expandedInput, action);
+    let decision = await decideTarget(state, expandedInput, action, event.toolName, absPath);
     if (expandedInput !== absPath) {
-      const altDecision = await decideTarget(state, absPath, action);
+      const altDecision = await decideTarget(state, absPath, action, event.toolName, absPath);
       if (severity(altDecision) > severity(decision)) {
         // Use the stricter decision but keep the input path for audit readability.
         decision = altDecision;
@@ -671,6 +692,8 @@ export function registerPermissionGate(
     state: SessionState,
     absPath: string,
     action: "read" | "write" | "delete",
+    toolName?: string,
+    toolPattern?: string,
   ): Promise<Decision> {
     // Resolve to absolute path before realpath. `toAbsolutePath` handles
     // relative paths (relative to projectRoot) and does NOT require the file
@@ -720,6 +743,8 @@ export function registerPermissionGate(
       action,
       isInside: inside,
       sensitive,
+      toolName,
+      toolPattern,
     });
   }
 

@@ -40,6 +40,8 @@ function decideFor(opts: {
   projectRoot?: string;
   action?: "read" | "write" | "delete";
   isInside?: boolean;
+  toolName?: string;
+  toolPattern?: string;
 }) {
   const {
     policy,
@@ -47,6 +49,8 @@ function decideFor(opts: {
     projectRoot = "/proj",
     action = "read",
     isInside,
+    toolName,
+    toolPattern,
   } = opts;
 
   // Auto-compute isInside if not provided.
@@ -64,6 +68,8 @@ function decideFor(opts: {
     action,
     isInside: computedInside,
     sensitive: findSensitiveMatch(absPath),
+    toolName,
+    toolPattern,
   });
 }
 
@@ -544,4 +550,92 @@ test("AD-DEV-05: non_dev_socket_write_uses_normal_defaults", () => {
   if (d.kind === "auto_allow") {
     assert.equal(d.declaration, "unconfigured");
   }
+});
+
+// -------- AD-RULE-1 to AD-RULE-5: tool+pattern rule tests --------
+
+test("AD-RULE-1: allow_rule_skips_non_sensitive_prompt", () => {
+  const policy = makePolicy(
+    {},
+    { rules: [{ tool: "bash", pattern: "git *", action: "allow" }] },
+    {},
+  );
+  const d = decideFor({
+    policy,
+    absPath: "/tmp/git-remote-config",
+    action: "write",
+    isInside: false,
+  });
+  assert.equal(d.kind, "auto_allow");
+});
+
+test("AD-RULE-2: allow_rule_does_not_bypass_sensitive", () => {
+  const policy = makePolicy(
+    {},
+    { rules: [{ tool: "bash", pattern: "git *", action: "allow" }] },
+    {},
+  );
+  const d = decideFor({
+    policy,
+    absPath: "/Users/eliot/.ssh/id_rsa",
+    action: "write",
+    isInside: false,
+  });
+  assert.equal(d.kind, "prompt");
+  if (d.kind === "prompt") {
+    assert.equal(d.tier, "two");
+  }
+});
+
+test("AD-RULE-3: deny_rule_unconditionally_denies", () => {
+  const policy = makePolicy(
+    {},
+    { rules: [{ tool: "bash", pattern: "rm *", action: "deny" }] },
+    {},
+  );
+  const d = decideFor({
+    policy,
+    absPath: "/proj/somefile",
+    action: "delete",
+    isInside: true,
+    toolName: "bash",
+    toolPattern: "rm -rf /proj/somefile",
+  });
+  assert.equal(d.kind, "deny_hard");
+});
+
+test("AD-RULE-4: deny_wins_over_allow_same_tool_pattern", () => {
+  const global = {
+    rules: [{ tool: "bash", pattern: "git *", action: "allow" as const }],
+  };
+  const project = {
+    rules: [{ tool: "bash", pattern: "git *", action: "deny" as const }],
+  };
+  const policy = makePolicy(global, project, {});
+  const d = decideFor({
+    policy,
+    absPath: "/tmp/git-config",
+    action: "write",
+    isInside: false,
+    toolName: "bash",
+    toolPattern: "git config --global user.name x",
+  });
+  assert.equal(d.kind, "deny_hard");
+});
+
+test("AD-RULE-5: path_declaration_wins_over_allow_rule", () => {
+  const global = {
+    paths: { "/etc/*": "unread" },
+    rules: [{ tool: "bash", pattern: "cat *", action: "allow" as const }],
+  };
+  const policy = makePolicy(global, {}, {});
+  const d = decideFor({
+    policy,
+    absPath: "/etc/passwd",
+    action: "read",
+    isInside: false,
+    toolName: "bash",
+    toolPattern: "cat /etc/passwd",
+  });
+  assert.equal(d.kind, "deny_hard");
 });
