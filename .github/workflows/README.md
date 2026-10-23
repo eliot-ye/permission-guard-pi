@@ -1,7 +1,7 @@
 # CI / Release workflows
 
 Publishing is done via **npm Trusted Publishing** (OIDC), not `npm token`.
-See [`publish.yml`](./publish.yml).
+See [`npm-publish.yml`](./npm-publish.yml).
 
 ## One-time npm setup
 
@@ -11,45 +11,40 @@ Do this once, in a browser:
 2. Go to https://www.npmjs.com/package/permission-guard-pi → **Settings → Trusted Publishing** (or **Publishing** tab, depending on the UI version) → **Add trusted publisher**.
    - GitHub owner: `eliot-ye`
    - Repository: `permission-guard-pi`
-   - Workflow file: `publish.yml`
+   - Workflow file: `npm-publish.yml`
 
-That's it. After this, the npm registry knows that a run of `.github/workflows/publish.yml` on this repo may publish the package.
+That's it. After this, the npm registry knows that a run of `.github/workflows/npm-publish.yml` on this repo may publish the package.
 
 No `NPM_TOKEN` secret is stored in repo settings. No OTP is entered during CI — the workflow exchanges a short-lived OIDC token with npm for a publish grant.
 
 ## How to publish a version
 
-Local half (bump + tag + push):
-
 ```bash
-npm version patch   # bumps package.json + package-lock.json, creates a commit AND a tag
-git push --follow-tags
+npm version patch      # or minor / major — bumps package.json + package-lock.json, creates a commit AND a tag
+git push --follow-tags # pushes both
 ```
 
-Or with `--no-git-tag-version` if you want to control tagging manually.
+Then on GitHub:
 
-Remote half (run the workflow):
+1. **Releases** → **Draft a new release** → select the tag you just pushed (e.g. `v0.1.2`).
+2. Fill in the changelog for the release notes.
+3. Click **Publish release**.
 
-1. GitHub → Actions → `publish` → **Run workflow**.
-2. Enter the tag you pushed (e.g. `v0.1.2`) and click Run.
-3. Watch the run: it checks out that tag, installs deps, runs typecheck + tests, verifies the tag matches `package.json`'s version, then `npm publish --provenance`.
-
-The workflow's "assert tag matches package.json version" step is the safety check — it fails fast if you try to publish a tag whose `package.json` version doesn't line up.
+Publishing the release is what triggers the workflow — you don't click a separate "Run workflow" button.
 
 ## What the workflow does
 
-1. `actions/checkout` at the requested tag
-2. `actions/setup-node` with Node 22 + npm registry
+1. `actions/checkout` at the release tag
+2. `actions/setup-node` with Node 24 + npm registry (no package-manager cache)
 3. `npm ci`
 4. `npm run typecheck`
 5. `npm test`
-6. Bash assertion: `${{ inputs.tag }} == v$(cat package.json | jq -r .version)`
-7. `npm publish --provenance`
+6. `npm publish --provenance`
 
-Steps 1–6 mirror the local release gate exactly, so a green CI run means the local gates would have passed.
+Steps 1–5 mirror the local release gate exactly, so a green CI run means the local gates would have passed.
 
 ## Not covered
 
-- **Changelog generation.** There's no automated `CHANGELOG.md`. Add one if you want.
-- **Automatic bump on push.** Deliberately manual — releases are gated by an intentional "Run workflow" click so you can review what's about to ship.
-- **Auto-release on tag push.** Same reasoning. If you want it, remove `workflow_dispatch` and add `on: push: tags: ['v*']`, then drop the version-match assertion.
+- **Changelog generation.** Manual. If you want it automated, add `release-please` or `semantic-release`.
+- **Automatic publish on tag push.** Deliberately release-driven — the GitHub Release page doubles as the changelog, and publishing the release is the intentional "ship it" click.
+- **Cross-platform builds.** This package is pure TypeScript loaded by pi at runtime via jiti — no build step needed.

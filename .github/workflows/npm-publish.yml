@@ -1,0 +1,35 @@
+# Publishes permission-guard-pi to npm with provenance via Trusted Publishing (OIDC).
+#
+# Trigger: create a GitHub Release (tag + changelog) → Actions picks it up automatically.
+# Required one-time setup:
+#   1. npm account has 2FA enabled.
+#   2. On npmjs.com → package → Settings → Trusted Publishing, add a publisher
+#      pointing at this repo's workflow file.
+# After that, npm publishes via short-lived OIDC tokens — no NPM_TOKEN secret,
+# no interactive OTP during CI runs.
+#
+# Pre-publish gates run in-order: typecheck → tests → publish.
+
+name: Node.js Package
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false  # never use caching in release builds
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm publish --provenance
