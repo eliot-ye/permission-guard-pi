@@ -1,6 +1,6 @@
 {
   "name": "permission-guard-pi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Layered, configurable file-access control for pi-coding-agent. Dual region (project_inner / project_outer) x three-tier permissions (read_write / read_only / unread), with session- and persistent-grant memory, audit log, and default-sensitive-path fallback.",
   "keywords": [
     "pi-package",
