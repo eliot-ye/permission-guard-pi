@@ -1,7 +1,7 @@
 //
 // Audit log. Pure module (except for fs). No pi imports.
 //
-// JSONL append-only log at ~/.pi/agent/extensions/@permission-guard/pi/logs/permission-review.jsonl
+// JSONL append-only log at ~/.pi/agent/extensions/permission-guard-pi/logs/permission-review.jsonl
 //
 // Serial queue ensures concurrent tool calls don't interleave on the same
 // file descriptor.

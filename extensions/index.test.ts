@@ -190,7 +190,7 @@ test("AF2: two_tier_prompt_shows_three_options", async () => {
       "utf8",
     );
 
-    let capturedChoices: string[] | undefined;
+    let capturedChoices: string[] | undefined = undefined;
     const { pi, ctx } = createMockPi({
       trustedDir: dir,
       configPaths: {
@@ -231,9 +231,10 @@ test("AF2: two_tier_prompt_shows_three_options", async () => {
       input: { path: "/Users/x/.ssh/id_rsa" },
     });
 
-    assert.ok(capturedChoices);
+    const choices: string[] | undefined = capturedChoices as string[] | undefined;
+    assert.ok(choices);
     // Three options only; "Always allow" is not offered for sensitive paths.
-    assert.equal(capturedChoices!.length, 3, "expected 3 options for tier=two (sensitive outer read)");
+    assert.equal(choices!.length, 3, "expected 3 options for tier=two (sensitive outer read)");
   });
 });
 

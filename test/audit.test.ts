@@ -52,7 +52,7 @@ test("AL4: audit_logger_appends_jsonl_line_per_record", async () => {
     const lines = raw.trim().split("\n");
     assert.equal(lines.length, 2);
     // Each line is valid JSON.
-    const parsed = lines.map(JSON.parse);
+    const parsed = lines.map((line) => JSON.parse(line));
     assert.equal(parsed[0].event, "auto_allow");
     assert.equal(parsed[1].event, "hard_deny");
     // ts should be injected.

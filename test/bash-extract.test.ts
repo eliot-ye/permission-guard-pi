@@ -320,7 +320,7 @@ test("BT-extra: quoted glob is now reliable (quote-aware scanner treats as liter
 test("BT-extra: find without glob extracts paths", () => {
   const r = extractBashTargets("find /etc/passwd -type f", "/proj");
   assert.equal(r.reliable, true);
-  const reads = (r as any).targets.filter((t) => t.action === "read");
+  const reads = (r as any).targets.filter((t: any) => t.action === "read");
   assert.ok(reads.length >= 1, "should extract at least one read target");
 });
 
@@ -328,9 +328,9 @@ test("BT-extra: tree/stat/du/df/file/less/more all classified as read", () => {
   for (const cmd of ["tree", "stat", "du", "df", "file", "less", "more"]) {
     const r = extractBashTargets(`${cmd} /tmp/somepath`, "/proj");
     assert.equal(r.reliable, true, `${cmd} should be reliable`);
-    const reads = (r as any).targets.filter((t) => t.action === "read");
+    const reads = (r as any).targets.filter((t: any) => t.action === "read");
     assert.ok(
-      reads.some((t) => t.path === "/tmp/somepath"),
+      reads.some((t: any) => t.path === "/tmp/somepath"),
       `${cmd} should extract /tmp/somepath as read`,
     );
   }
@@ -341,9 +341,9 @@ test("BT-extra: tree/stat/du/df/file/less/more all classified as read", () => {
 test("BT-extra: mkdir extracts paths as write targets", () => {
   const r = extractBashTargets("mkdir /tmp/foo/bar", "/proj");
   assert.equal(r.reliable, true);
-  const writes = (r as any).targets.filter((t) => t.action === "write");
+  const writes = (r as any).targets.filter((t: any) => t.action === "write");
   assert.ok(
-    writes.some((t) => t.path === "/tmp/foo/bar"),
+    writes.some((t: any) => t.path === "/tmp/foo/bar"),
     "mkdir should extract path as write",
   );
 });
@@ -351,9 +351,9 @@ test("BT-extra: mkdir extracts paths as write targets", () => {
 test("BT-extra: touch extracts paths as write targets", () => {
   const r = extractBashTargets("touch /tmp/foo.log", "/proj");
   assert.equal(r.reliable, true);
-  const writes = (r as any).targets.filter((t) => t.action === "write");
+  const writes = (r as any).targets.filter((t: any) => t.action === "write");
   assert.ok(
-    writes.some((t) => t.path === "/tmp/foo.log"),
+    writes.some((t: any) => t.path === "/tmp/foo.log"),
     "touch should extract path as write",
   );
 });
@@ -363,9 +363,9 @@ test("BT-extra: touch extracts paths as write targets", () => {
 test("BT-extra: test -e PATH extracts as read", () => {
   const r = extractBashTargets("test -e /tmp/x.txt", "/proj");
   assert.equal(r.reliable, true);
-  const reads = (r as any).targets.filter((t) => t.action === "read");
+  const reads = (r as any).targets.filter((t: any) => t.action === "read");
   assert.ok(
-    reads.some((t) => t.path === "/tmp/x.txt" && t.action === "read"),
+    reads.some((t: any) => t.path === "/tmp/x.txt" && t.action === "read"),
     "test -e should extract path as read",
   );
 });
@@ -2487,7 +2487,7 @@ test("BT-B7i: sed with command_substitution still unreliable_command", () => {
   const r = extractBashTargets("sed -i \"x\" $(cat /etc/passwd)", PROJ);
   assert.equal(r.reliable, false);
   if (!r.reliable) {
-    assert.ok(["unreliable_command", "command_substitution"].includes(r.reason),
+    assert.ok(["unreliable_command", "command_substitution"].includes(r.reason!),
       `expected unreliable_command or command_substitution, got ${r.reason}`);
   }
 });
@@ -2602,7 +2602,7 @@ test("BT-B37: git status && rm -rf /etc/passwd is NOT silently misclassified", (
       `expected delete target /etc/passwd, got ${JSON.stringify(r.targets)}`,
     );
   } else {
-    assert.ok(["unreliable_command", "shell_forwarder"].includes(r.reason),
+    assert.ok(["unreliable_command", "shell_forwarder"].includes(r.reason!),
       `expected unreliable, got ${r.reason}`);
   }
 });
@@ -3068,7 +3068,7 @@ test("BT-C3-4: npx_no_install_with_extra_positional_still_unreliable", () => {
   assert.equal(r.reliable, false, `expected unreliable, got reliable`);
   if (!r.reliable) {
     assert.ok(
-      ["unreliable_command", "glob_expansion"].includes(r.reason),
+      ["unreliable_command", "glob_expansion"].includes(r.reason!),
       `expected unreliable_command or glob_expansion, got ${r.reason}`,
     );
   }
@@ -3162,7 +3162,7 @@ test("substitution_glob_arg_still_unreliable: basename_with_unquoted_glob_arg_st
   assert.equal(r.reliable, false, `expected unreliable, got reliable`);
   if (!r.reliable) {
     assert.ok(
-      ["command_substitution", "glob_expansion"].includes(r.reason),
+      ["command_substitution", "glob_expansion"].includes(r.reason!),
       `expected command_substitution or glob_expansion, got ${r.reason}`,
     );
   }

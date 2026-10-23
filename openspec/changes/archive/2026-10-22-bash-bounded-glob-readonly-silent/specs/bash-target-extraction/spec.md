@@ -48,13 +48,13 @@
 
 #### Scenario: 项目内 ls glob 自动放行
 
-- **WHEN** bash 命令为 `ls openspec/changes/archive/*/`，projectRoot 为 `/Users/eliot/my/@permission-guard/pi`
-- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/@permission-guard/pi/openspec/changes/archive/] }`（按前缀目录读处理），不触发 glob_expansion
+- **WHEN** bash 命令为 `ls openspec/changes/archive/*/`，projectRoot 为 `/Users/eliot/my/permission-guard-pi`
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/openspec/changes/archive/] }`（按前缀目录读处理），不触发 glob_expansion
 
 #### Scenario: 项目内 cat glob 自动放行
 
 - **WHEN** bash 命令为 `cat openspec/specs/*/spec.md`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/@permission-guard/pi/openspec/specs/] }`，不触发 glob_expansion
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/openspec/specs/] }`，不触发 glob_expansion
 
 #### Scenario: `find . -name "*.ts"` 自动放行
 
@@ -99,7 +99,7 @@
 #### Scenario: git log 带路径 glob 自动放行
 
 - **WHEN** bash 命令为 `git log --oneline openspec/specs/*/spec.md`
-- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/@permission-guard/pi/openspec/specs/] }`，不触发 glob_expansion
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/openspec/specs/] }`，不触发 glob_expansion
 
 #### Scenario: `;` 分隔的多命令中每片段独立判定
 

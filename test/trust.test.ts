@@ -269,7 +269,6 @@ test("GM15: bash_persistent_grant_survives_session_restart", async () => {
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
     });
     // Simulate new session (recreate store from same file).
     const store2 = await createTrustStore(path);
@@ -296,7 +295,6 @@ test("GM17: bash_persistent_grant_preserves_command_hash_and_raw", async () => {
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
     });
     await store.flush();
     const raw = await readFile(path, "utf8");
@@ -321,7 +319,6 @@ test("GM18: bash_persistent_grant_upserts_by_command_hash", async () => {
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
     });
     await store.addBashPersistentGrant({
       projectHash: "h1",
@@ -329,7 +326,6 @@ test("GM18: bash_persistent_grant_upserts_by_command_hash", async () => {
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_write",
-      createdAt: new Date().toISOString(),
     });
     await store.flush();
     const raw = await readFile(path, "utf8");
@@ -369,7 +365,6 @@ test("GMP1: trust_store_writes_trusted_json_with_0600_permissions", async () => 
       action: "read",
       path: "/abs/path",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
     });
     const s = await stat(path);
     assert.equal(
@@ -400,7 +395,6 @@ test("GMP3: atomic_write_chmods_existing_trusted_json_to_0600", async () => {
       action: "read",
       path: "/abs/path",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
     });
     // Widen the file to 0644.
     await chmod(path, 0o644);
@@ -413,7 +407,6 @@ test("GMP3: atomic_write_chmods_existing_trusted_json_to_0600", async () => {
       action: "write",
       path: "/abs/path2",
       permission: "read_write",
-      createdAt: new Date().toISOString(),
     });
     const tightened = await stat(path);
     assert.equal(
@@ -452,7 +445,6 @@ test("T-TRUST-LA-2: persistent_grant_hit_returns_stored_author", async () => {
       action: "read",
       path: "/abs/path",
       permission: "read_write",
-      createdAt: new Date().toISOString(),
       author: "by_person",
     });
     assert.equal(
@@ -519,7 +511,6 @@ test("T-TRUST-LA-6: bash_persistent_grant_hit_returns_stored_author", async () =
       rawCommand: "cat /etc/hosts",
       reason: "glob_expansion",
       permission: "read_only",
-      createdAt: new Date().toISOString(),
       author: "by_person",
     });
     assert.equal(

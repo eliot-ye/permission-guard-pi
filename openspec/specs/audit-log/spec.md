@@ -28,7 +28,7 @@
 
 ### Requirement: 日志文件位置与格式
 
-审计日志 MUST 写入 `~/.pi/agent/extensions/@permission-guard/pi/logs/permission-review.jsonl`，JSONL 格式（每行一条 JSON 记录，`ts` 字段由系统注入）。
+审计日志 MUST 写入 `~/.pi/agent/extensions/permission-guard-pi/logs/permission-review.jsonl`，JSONL 格式（每行一条 JSON 记录，`ts` 字段由系统注入）。
 
 #### Scenario: 日志追加写入
 
@@ -107,7 +107,7 @@
 
 ### Requirement: 日志文件目录自动创建
 
-写入前 MUST 检查 `~/.pi/agent/extensions/@permission-guard/pi/logs/` 目录存在，不存在则递归创建。
+写入前 MUST 检查 `~/.pi/agent/extensions/permission-guard-pi/logs/` 目录存在，不存在则递归创建。
 
 #### Scenario: 首次写入自动创建目录
 
@@ -120,7 +120,7 @@
 
 具体约束：
 
-- 首次创建 `~/.pi/agent/extensions/@permission-guard/pi/logs/` 目录时，MUST 使用 `0o700` 权限（`fs.mkdir({ mode: 0o700, recursive: true })`）
+- 首次创建 `~/.pi/agent/extensions/permission-guard-pi/logs/` 目录时，MUST 使用 `0o700` 权限（`fs.mkdir({ mode: 0o700, recursive: true })`）
 - 每次审计写入前，MUST 尝试将目标日志文件权限收敛为 `0o600`——但仅当文件属主为当前进程用户时才执行 chmod；属主不匹配时 MUST 跳过 chmod 且不阻塞审计写入（避免在共享账号或多用户环境下造成权限混乱）
 - chmod 失败 MUST NOT 阻塞工具调用或触发错误提示——审计写入的 fire-and-forget 语义不变（见"日志写入不影响决策流程"requirement）
 - Windows 环境下 `fs.chmod` 是 no-op，本 requirement 在 Windows 上自动无操作

@@ -10,7 +10,7 @@
 系统 SHALL 维护两个独立的授权记忆通道：
 
 - **会话级**：进程内存中的 Map，重启失效。任何弹窗的"会话内允许"选项写入此通道。
-- **持久化**：磁盘 JSON 文件 `~/.pi/agent/extensions/@permission-guard/pi/trusted.json`。任何弹窗的"总是允许"选项写入此通道。
+- **持久化**：磁盘 JSON 文件 `~/.pi/agent/extensions/permission-guard-pi/trusted.json`。任何弹窗的"总是允许"选项写入此通道。
 
 授权记忆查询发生在 **extension 层**（在调用决策引擎之前）：extension 同时检查两个通道，任一击中即直接放行，不调用决策引擎。决策引擎收到的都是"未授权"请求。
 
@@ -212,7 +212,7 @@
 
 具体约束：
 
-- 首次创建 `~/.pi/agent/extensions/@permission-guard/pi/` 父目录时，MUST 使用 `0o700` 权限（`fs.mkdir({ mode: 0o700, recursive: true })`）
+- 首次创建 `~/.pi/agent/extensions/permission-guard-pi/` 父目录时，MUST 使用 `0o700` 权限（`fs.mkdir({ mode: 0o700, recursive: true })`）
 - 每次 `atomicWrite` 落盘后，MUST 尝试将目标 `trusted.json` 文件权限收敛为 `0o600`——但仅当文件属主为当前进程用户时才执行 chmod；属主不匹配时 MUST 跳过 chmod 且不阻塞写入
 - chmod 失败 MUST NOT 阻塞持久化授权写入；写入失败时的原有错误处理路径（session grant 降级）保持不变
 - Windows 环境下 `fs.chmod` 是 no-op，本 requirement 在 Windows 上自动无操作
@@ -224,7 +224,7 @@
 
 #### Scenario: 目录首次创建以 0o700
 
-- **WHEN** 用户首次运行扩展，父目录 `~/.pi/agent/extensions/@permission-guard/pi/` 不存在
+- **WHEN** 用户首次运行扩展，父目录 `~/.pi/agent/extensions/permission-guard-pi/` 不存在
 - **THEN** 目录被递归创建，`fs.stat(parentDir).mode & 0o777 === 0o700`
 
 #### Scenario: atomicWrite 后既有文件权限收敛到 0o600

@@ -2723,7 +2723,7 @@ function isForBodyReadOnly(body: string): boolean {
     if (!part.trim()) continue;
     const tokens = tokenize(part);
     if (tokens.length === 0) continue;
-    const cmdName = tokens[0].split("/").pop();
+    const cmdName = tokens[0]?.split("/").pop() ?? "";
     // `isReadOnlyWithArgs` gives `find` per-argument analysis (write flags
     // like `-delete`/`-exec` make the body non-read-only). Other commands
     // fall through to READ_ONLY_COMMANDS via isReadOnlyWithArgs.

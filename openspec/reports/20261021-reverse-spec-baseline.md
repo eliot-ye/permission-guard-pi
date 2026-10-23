@@ -1,4 +1,4 @@
-# Reverse-Spec 报告：@permission-guard/pi
+# Reverse-Spec 报告：permission-guard-pi
 
 - **触发入口**：第一入口（首次运行 `/td-reverse-spec`，用户显式调用）
 - **判读状态**：缓存命中（`openspec/.td-state/profile-tier.yaml`，`profile-brownfield` × `tier-medium`，2026-10-21T12:13:00+08:00），本次不重判

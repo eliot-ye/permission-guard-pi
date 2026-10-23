@@ -28,6 +28,7 @@ function createMockPi(opts: {
   projectRoot: string;
   hasUI?: boolean;
   uiChoice?: UIChoiceHandler;
+  configPaths?: unknown;
 }): {
   pi: any;
   ctx: any;

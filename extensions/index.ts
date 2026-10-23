@@ -1,5 +1,5 @@
 /**
- * @permission-guard/pi
+ * permission-guard-pi
  *
  * Layered, configurable file-access control for pi-coding-agent.
  *
@@ -11,7 +11,7 @@
  *   - Two-tier memory: session (in-memory) + persistent (trusted.json on disk)
  *   - Cross-source conflict detection: unread-involved conflicts → three-tier
  *     prompt; other conflicts → silent local override
- *   - JSONL audit log at ~/.pi/agent/extensions/@permission-guard/pi/logs/
+ *   - JSONL audit log at ~/.pi/agent/extensions/permission-guard-pi/logs/
  *
  * Design decisions (see design.md D1, D10, D11):
  *   - decide() is a pure function; memory lookup is done here in extension
@@ -46,7 +46,7 @@ import { decide, type Decision } from "../src/lib/decision.ts";
 // -------- Config for the extension registration --------
 
 export interface PermissionExtensionOptions {
-  // Directory where trusted.json lives. Default: ~/.pi/agent/extensions/@permission-guard/pi
+  // Directory where trusted.json lives. Default: ~/.pi/agent/extensions/permission-guard-pi
   trustedDir: string;
   // Locations of the three config files. Defaults are provided via configLocations().
   configPaths?: {
@@ -955,7 +955,6 @@ export function registerPermissionGate(
             action,
             path: absPath,
             permission,
-            createdAt: new Date().toISOString(),
           });
           state.audit.log({
             event: "allow_persistent",
@@ -1009,7 +1008,6 @@ export function registerPermissionGate(
             rawCommand: bashCommand,
             reason: bashReason ?? "unreliable",
             permission: bashPermission,
-            createdAt: new Date().toISOString(),
           });
           state.audit.log({
             event: "allow_persistent",
@@ -1070,9 +1068,9 @@ async function resolveToAbsolute(inputPath: string, projectRoot: string): Promis
 
 // The default export is what pi-coding-agent calls. It registers the
 // permission gate with sensible defaults:
-//   - trustedDir: ~/.pi/agent/extensions/@permission-guard/pi
+//   - trustedDir: ~/.pi/agent/extensions/permission-guard-pi
 //   - config paths: via configLocations() at session start
 export default function (pi: any) {
-  const trustedDir = join(homedir(), ".pi/agent/extensions/@permission-guard/pi");
+  const trustedDir = join(homedir(), ".pi/agent/extensions/permission-guard-pi");
   registerPermissionGate(pi, { trustedDir });
 }

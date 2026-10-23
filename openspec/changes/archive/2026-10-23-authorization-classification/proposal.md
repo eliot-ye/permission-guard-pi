@@ -38,7 +38,7 @@
   - `src/lib/audit.ts`：`AuditRecord` 加 `authorization` + `grant_source` 字段
   - `src/lib/trust.ts`：`Grant` / `BashGrant` 加 `author` 字段；`createTrustStore` 读取持久化时做默认迁移（`undefined → "by_person"`）
   - `extensions/index.ts`：`decideTarget` / `handlePromptDecision` 回填 authorization；所有 `audit.log({...})` 调用点补字段
-- **数据**：`~/.pi/agent/extensions/@permission-guard/pi/trusted.json`——存量条目读取时自动迁移（无磁盘写入，纯内存视图迁移）；首次持久化写入时会带上新字段
+- **数据**：`~/.pi/agent/extensions/permission-guard-pi/trusted.json`——存量条目读取时自动迁移（无磁盘写入，纯内存视图迁移）；首次持久化写入时会带上新字段
 - **审计消费者**：`permission-review.jsonl` 新增字段，旧消费者按"忽略未知字段"兼容
 - **测试面**：`test/decision.test.ts`、`test/audit.test.ts`、`test/trust.test.ts`、`extensions/index.test.ts` 均需补断言；`bash-extract.test.ts`、`sensitive.test.ts`、`config.test.ts` 无关
 

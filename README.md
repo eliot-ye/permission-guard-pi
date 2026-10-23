@@ -1,4 +1,4 @@
-# @permission-guard/pi
+# permission-guard-pi
 
 Layered, configurable file-access control for pi-coding-agent.
 
@@ -23,7 +23,7 @@ persistent, project-scoped memory and an audit trail.
 ## Install
 
 ```bash
-pi install npm:@permission-guard/pi
+pi install npm:permission-guard-pi
 ```
 
 Or from a local checkout:
@@ -39,21 +39,21 @@ data now lives under a new path:
 
 | Before | After |
 |--------|-------|
-| `~/.pi/agent/extensions/@permission-system:pi-extension/` | `~/.pi/agent/extensions/@permission-guard/pi/` |
+| `~/.pi/agent/extensions/@permission-system:pi-extension/` | `~/.pi/agent/extensions/permission-guard-pi/` |
 
 Historical `trusted.json` and `logs/permission-review.jsonl` at the old
 path are NOT migrated — remove them if you want a clean break, or copy
 them over manually:
 
 ```bash
-mv ~/.pi/agent/extensions/@permission-system:pi-extension ~/.pi/agent/extensions/@permission-guard/pi
+mv ~/.pi/agent/extensions/@permission-system:pi-extension ~/.pi/agent/extensions/permission-guard-pi
 ```
 
 Re-install after the rename:
 
 ```bash
 pi remove @permission-system:pi-extension
-pi install npm:@permission-guard/pi
+pi install npm:permission-guard-pi
 ```
 
 ## Configuration
@@ -132,7 +132,7 @@ Two-tier appears when:
 - The path matches a built-in sensitive rule (SSH keys, `.env`, `.pem`, etc.) — we can't safely persist these
 - A bash command can't be reliably parsed (command substitution `$(...)`, backtick, process substitution `<(...)`, heredocs, forwarders like `xargs` in non-first pipeline stages, unquoted globs, unresolved variables, etc.) — we can't predict what will run
 
-"Always allow" persists to `~/.pi/agent/extensions/@permission-guard/pi/trusted.json`
+"Always allow" persists to `~/.pi/agent/extensions/permission-guard-pi/trusted.json`
 under a key of `<projectHash>|<action>|<path>`. It's project-scoped, so
 grants in one project never leak into another.
 
@@ -327,7 +327,7 @@ If two config sources declare different permissions for the same path:
 Every permission decision is written to:
 
 ```
-~/.pi/agent/extensions/@permission-guard/pi/logs/permission-review.jsonl
+~/.pi/agent/extensions/permission-guard-pi/logs/permission-review.jsonl
 ```
 
 Each line is a JSON object:
@@ -345,7 +345,7 @@ Each line is a JSON object:
   "declaration": "read_write",
   "permission": "read_write",
   "toolCallId": "tc-123",
-  "note": "saved to ~/.pi/agent/extensions/@permission-guard/pi/trusted.json"
+  "note": "saved to ~/.pi/agent/extensions/permission-guard-pi/trusted.json"
 }
 ```
 
@@ -392,14 +392,14 @@ compatibility — do not try to backfill fields into existing log lines.
 ## Uninstall
 
 ```bash
-pi remove @permission-guard/pi
+pi remove permission-guard-pi
 ```
 
 Your configs and `trusted.json` remain on disk. Delete them manually if
 you want a full clean:
 
 ```bash
-rm -rf ~/.pi/agent/extensions/@permission-guard/pi/
+rm -rf ~/.pi/agent/extensions/permission-guard-pi/
 rm ~/.pi/agent/permission.json  # if you created one
 ```
 
@@ -412,10 +412,16 @@ npm install
 npm test
 ```
 
-Tests use the Node.js built-in test runner:
+Tests use the Node.js built-in test runner (requires Node.js >= 22.18):
+
+```bash
+npm test
+```
+
+Which runs:
 
 ```
-node --experimental-strip-types --test test/**/*.test.ts
+node --test "test/*.test.ts" "extensions/*.test.ts"
 ```
 
 ## Contributing

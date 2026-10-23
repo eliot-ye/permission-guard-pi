@@ -51,7 +51,7 @@ tier=two 的副文本 MUST 按决策来源分派，MUST NOT 使用统一文案�
 #### Scenario: 三档弹窗显示保存位置
 
 - **WHEN** 用户看到 tier=three 弹窗（配置声明路径）
-- **THEN** 弹窗文案包含字符串 `~/.pi/agent/extensions/@permission-guard/pi/trusted.json`
+- **THEN** 弹窗文案包含字符串 `~/.pi/agent/extensions/permission-guard-pi/trusted.json`
 
 #### Scenario: 两档弹窗显示提示
 

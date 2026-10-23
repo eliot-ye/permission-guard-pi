@@ -217,7 +217,7 @@ persistentBashGrants = parsed.bashGrants.map((g) => ({ ...g, author: g.author ??
 
 **部署步骤**（无停机需求，本扩展无服务端部署）：
 
-1. 合并代码，发布 `@permission-guard/pi` 新版本
+1. 合并代码，发布 `permission-guard-pi` 新版本
 2. 用户升级 pi-extension 后：
    - **首次决策时**：`createTrustStore` 加载 trusted.json → 内存中 grants 补 `author: "by_person"`
    - **首次持久化写入时**：`addPersistentGrant` 写入带 `author: "by_person"` 的条目，磁盘文件更新

@@ -8,8 +8,8 @@ node_modules/
 # npm local package (regenerated via `npm pack`)
 *.tgz
 
-# Lock file (install from git URL, no npm registry pin)
-package-lock.json
+# package-lock.json is committed on purpose — npm publish needs a
+# reproducible dependency graph for reviewers and CI.
 
 # OS
 .DS_Store

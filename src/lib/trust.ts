@@ -74,6 +74,13 @@ export interface Grant {
   author?: GrantAuthor;
 }
 
+/** Input shape accepted by `addPersistentGrant`. `createdAt` is populated
+ *  by the store itself. `author` stays optional so callers can still pass
+ *  an explicit value (the store defaults it to "by_person" if omitted).
+ *  Keeping the input type separate from the on-disk `Grant` makes the
+ *  responsibility boundary explicit. */
+export type GrantInput = Omit<Grant, "createdAt">;
+
 export interface BashGrant {
   projectHash: string;
   /** sha256(rawCommand), 64 lowercase hex chars. Stable identity of the command. */
@@ -88,6 +95,10 @@ export interface BashGrant {
   author?: GrantAuthor;
 }
 
+/** Input shape accepted by `addBashPersistentGrant`. `createdAt` is
+ *  populated by the store; `author` is optional. */
+export type BashGrantInput = Omit<BashGrant, "createdAt">;
+
 export interface TrustStore {
   // Path-based session-level (in-memory).
   hasSessionGrant: (projectHash: string, action: Action, path: string) => boolean;
@@ -96,7 +107,7 @@ export interface TrustStore {
 
   // Path-based persistent (disk-backed, async).
   hasPersistentGrant: (projectHash: string, action: Action, path: string) => boolean;
-  addPersistentGrant: (grant: Grant) => Promise<void>;
+  addPersistentGrant: (grant: GrantInput) => Promise<void>;
   getAllPersistent: () => Grant[];
 
   // Bash-command session-level (in-memory).
@@ -106,7 +117,7 @@ export interface TrustStore {
 
   // Bash-command persistent (disk-backed, async).
   hasBashPersistentGrant: (projectHash: string, rawCommand: string) => boolean;
-  addBashPersistentGrant: (grant: BashGrant) => Promise<void>;
+  addBashPersistentGrant: (grant: BashGrantInput) => Promise<void>;
   getAllPersistentBash: () => BashGrant[];
 
   // Author lookup (added for authorization-classification change).
@@ -209,7 +220,7 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
       return persistentGrants.some((g) => grantKey(g.projectHash, g.action, g.path) === key);
     },
 
-    addPersistentGrant: async (grant: Grant) => {
+    addPersistentGrant: async (grant: GrantInput) => {
       // Upsert by key.
       const key = grantKey(grant.projectHash, grant.action, grant.path);
       persistentGrants = persistentGrants.filter(
@@ -221,7 +232,7 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
         ...grant,
         author: grant.author ?? "by_person",
         createdAt: new Date().toISOString(),
-      });
+      } as Grant);
       await atomicWrite(trustedFilePath, { grants: persistentGrants, bashGrants: persistentBashGrants });
     },
 
@@ -250,7 +261,7 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
       return persistentBashGrants.some((g) => bashKey(g.projectHash, g.rawCommand) === key);
     },
 
-    addBashPersistentGrant: async (grant: BashGrant) => {
+    addBashPersistentGrant: async (grant: BashGrantInput) => {
       // Upsert by (projectHash, commandHash).
       const key = bashKey(grant.projectHash, grant.rawCommand);
       persistentBashGrants = persistentBashGrants.filter(
@@ -303,7 +314,7 @@ async function atomicWrite(path: string, data: unknown): Promise<void> {
   const dir = dirname(path);
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
   try {
-    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), "utf8", { mode: 0o600 });
+    await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
     await fs.rename(tmpPath, path);
     // Belt-and-braces: even if the tmp file was created with mode 0o600,
     // umask might have widened it (Node uses `mode & ~umask` for new
