@@ -352,6 +352,43 @@ Each line is a JSON object:
 `event` is one of: `allow_once`, `allow_session`, `allow_persistent`,
 `deny`, `hard_deny`, `conflict_prompt`, `auto_allow`.
 
+### Authorization provenance
+
+Every audit record also carries two optional fields that tell you *who* made
+the decision and *what rule / memory entry* fired. Consumers can filter on
+either axis without parsing the free-form `note` field.
+
+- `authorization`: `"by_person" | "presumed" | undefined`
+- `grant_source`:
+  `"config_declaration" | "allow_rule" | "grant_memory" | "bash_grant_memory" | "default" | undefined`
+
+**event → authorization mapping** (deterministic, guaranteed by the implementation):
+
+| event | authorization |
+|---|---|
+| `allow_once` | `by_person` |
+| `allow_session` | `by_person` |
+| `allow_persistent` | `by_person` |
+| `deny` | `by_person` |
+| `conflict_prompt` | `by_person` |
+| `hard_deny` | `presumed` |
+| `auto_allow` | from the decision (see below) |
+
+`authorization` answers "was a human in the loop for this decision?".
+`grant_source` answers "which rule / memory entry actually fired?" —
+the fine-grained origin:
+
+- `config_declaration` — a config rule (read_write / read_only) matched.
+- `allow_rule` — a tool+pattern allow rule matched (non-sensitive target).
+- `grant_memory` — a path-based grant-memory entry hit.
+- `bash_grant_memory` — a bash-command grant-memory entry hit.
+- `default` — region/sensitive/default fallback (no config, no rule).
+
+**Backward compatibility.** Records written before this field existed
+have neither `authorization` nor `grant_source`. Consumers MUST treat
+their absence as `undefined` and fall back to `event` semantics for
+compatibility — do not try to backfill fields into existing log lines.
+
 ## Uninstall
 
 ```bash

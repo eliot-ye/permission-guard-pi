@@ -22,6 +22,35 @@ export type Action = "read" | "write" | "delete";
 export type Region = "project_inner" | "project_outer";
 export type PromptTier = "three" | "two";
 
+/**
+ * Authorization provenance classification (design.md D1, D2).
+ *
+ * - "presumed": system-derived authorization (config rule / allow rule /
+ *   grant-memory hit / region default). Produced by decide() or by the
+ *   extension layer when a grant-memory lookup resolves.
+ * - "by_person": real-human authorization. Currently only produced by the
+ *   extension layer from promptUser() choices or from session-grant hits
+ *   (whose write path is human-driven).
+ *
+ * The two values are the coarse-grained split; grant_source below gives
+ * the fine-grained origin so audit consumers can filter on either axis
+ * without parsing the `note` field.
+ */
+export type Authorization = "presumed" | "by_person";
+
+/**
+ * Fine-grained grant source. Redundant with `authorization` on purpose
+ * (see design.md D1 "冗余但显式" rationale): `authorization` is the
+ * binary filter ("was a human in the loop?"), `grant_source` answers
+ * "which rule / memory entry actually fired".
+ */
+export type GrantSource =
+  | "config_declaration"
+  | "allow_rule"
+  | "grant_memory"
+  | "bash_grant_memory"
+  | "default";
+
 export type Declaration =
   | "read_write"
   | "read_only"
@@ -37,7 +66,11 @@ export interface DecisionCommon {
 }
 
 export type Decision =
-  | (DecisionCommon & { kind: "auto_allow" })
+  | (DecisionCommon & {
+      kind: "auto_allow";
+      authorization: Authorization;
+      grant_source: GrantSource;
+    })
   | (DecisionCommon & {
       kind: "deny_hard";
       denial: { reason: string };
@@ -115,6 +148,8 @@ export function decide(opts: {
           region,
           declaration: "read_only",
           configured: true,
+          authorization: "presumed",
+          grant_source: "config_declaration",
           reason: `Path declared read_only in ${entry.source} config; read allowed`,
         };
       }
@@ -136,6 +171,8 @@ export function decide(opts: {
           region: "project_inner",
           declaration: "read_write",
           configured: true,
+          authorization: "presumed",
+          grant_source: "config_declaration",
           reason: `Path declared read_write in ${entry.source} config; in-project ${action} auto-allowed`,
         };
       }
@@ -165,6 +202,8 @@ export function decide(opts: {
         region,
         declaration: "unconfigured",
         configured: false,
+        authorization: "presumed",
+        grant_source: "allow_rule",
         reason: `Allowed by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
       };
     }
@@ -221,6 +260,8 @@ export function decide(opts: {
       region,
       declaration: "unconfigured",
       configured: false,
+      authorization: "presumed",
+      grant_source: "default",
       reason: `Temporary directory default: ${absPath}`,
     };
   }
@@ -233,6 +274,8 @@ export function decide(opts: {
       region: "project_inner",
       declaration: "unconfigured",
       configured: false,
+      authorization: "presumed",
+      grant_source: "default",
       reason: `In-project non-sensitive ${action}; auto-allowed`,
     };
   }
@@ -244,6 +287,8 @@ export function decide(opts: {
       region: "project_outer",
       declaration: "unconfigured",
       configured: false,
+      authorization: "presumed",
+      grant_source: "default",
       reason: `Outside-project non-sensitive read; auto-allowed`,
     };
   }

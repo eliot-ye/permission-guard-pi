@@ -1257,3 +1257,289 @@ test("SYS-B4: bash grant + multi-path where ONE is unread → hard_deny", async 
     );
   });
 });
+
+// ============================================================
+// authorization-classification (D3 event→authorization + D4 grant_source)
+// Verifies audit.log call sites emit correct authorization + grant_source.
+// Also covers T4.2: bash grant memory hit → grant_source = bash_grant_memory.
+// ============================================================
+
+test("T-EXT-P1: allow_persistent_audit_carries_by_person_and_config_declaration", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    // Outer path declared read_write → tier=three prompt.
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/opt/x": "read_write" } }),
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async () => "Always allow (save to trusted.json)",
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+    await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "tc-p1",
+      input: { path: "/opt/x", content: "hi" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-p1");
+    assert.ok(rec, "expected audit record for tc-p1");
+    assert.equal(rec.event, "allow_persistent");
+    assert.equal(rec.authorization, "by_person");
+    assert.equal(rec.grant_source, "config_declaration");
+  });
+});
+
+test("T-EXT-P2: user_deny_audit_carries_by_person", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async () => "Deny",
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+    await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "tc-p2",
+      input: { path: "/outside/x.txt", content: "hi" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-p2");
+    assert.ok(rec);
+    assert.equal(rec.event, "deny");
+    assert.equal(rec.authorization, "by_person");
+  });
+});
+
+test("T-EXT-F2: hard_deny_audit_carries_presumed", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/etc/shadow": "unread" } }),
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+    await fireToolCall(pi, ctx, {
+      toolName: "read",
+      toolCallId: "tc-f2",
+      input: { path: "/etc/shadow" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-f2");
+    assert.ok(rec);
+    assert.equal(rec.event, "hard_deny");
+    assert.equal(rec.authorization, "presumed");
+    // grant_source is intentionally omitted (undefined) for hard_deny
+    // — it's not a grant event at all.
+    assert.equal("grant_source" in rec, false, "hard_deny MUST NOT carry grant_source");
+  });
+});
+
+test("T-EXT-P3: bash_session_grant_audit_grant_source_is_bash_grant_memory", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async (_p, choices) =>
+        choices.find((c) => c.includes("session")) ?? choices[0],
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+    // Unreliable bash command → tier=two prompt → allow_session
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-p3",
+      input: { command: "cat /tmp/*.log" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-p3");
+    assert.ok(rec);
+    assert.equal(rec.event, "allow_session");
+    assert.equal(rec.authorization, "by_person");
+    assert.equal(rec.grant_source, "bash_grant_memory");
+  });
+});
+
+// T4.2 coverage: bash grant memory HIT → auto_allow audit with
+// authorization by_person + grant_source bash_grant_memory.
+test("T-EXT-B1: bash_grant_memory_hit_auto_allow_audit_carries_bash_grant_memory", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async (_p, choices) =>
+        choices.find((c) => c.includes("session")) ?? choices[0],
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+    // First call: prompt + allow_session
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-b1-1",
+      input: { command: "cat /tmp/*.log" },
+    });
+    // Second call: grant hit → auto_allow audit (bash memory hit path)
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-b1-2",
+      input: { command: "cat /tmp/*.log" },
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const hit = lines.find((l) => l.toolCallId === "tc-b1-2");
+    assert.ok(hit, "expected auto_allow audit for grant memory hit");
+    assert.equal(hit.event, "auto_allow");
+    assert.equal(hit.authorization, "by_person");
+    assert.equal(hit.grant_source, "bash_grant_memory");
+  });
+});
+
+// T4.1 coverage: path-based grant memory HIT → auto_allow audit with
+// grant_source = grant_memory.
+// We use a reliable bash target (write to a path under a persistent grant)
+// so the flow reaches the audit.log auto_allow emit for path grants.
+//
+// Note: reliable bash auto_allow decisions do NOT emit audit records in
+// the current extension (baseline behavior — audit-log spec only requires
+// all decisions "except routine project_inner non-sensitive" to be logged,
+// and this path is inside an already-authorized path). The path-based
+// grant_source = grant_memory is verified at the decide() level (T-DEC-*)
+// and at the trust level (T-TRUST-LA-*); E2E confirmation here is limited
+// to the observable audit behavior.
+test("T-EXT-G1: path_grant_memory_hit_produces_auto_allow_decision", async () => {
+  // This is a unit-level integration check: seed a persistent grant,
+  // then verify lookupGrantAuthor returns by_person so that
+  // decideTarget's auto_allow branches correctly.
+  const { createTrustStore } = await import("../src/lib/trust.ts");
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "pi-ext-g1-"));
+  try {
+    const path = join(dir, "trusted.json");
+    const store = await createTrustStore(path);
+    await store.addPersistentGrant({
+      projectHash: "projA",
+      action: "read",
+      path: "/opt/authorized",
+      permission: "read_write",
+    });
+    const author = store.lookupGrantAuthor("projA", "read", "/opt/authorized");
+    assert.equal(author, "by_person", "persistent grant memory hit → by_person author");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

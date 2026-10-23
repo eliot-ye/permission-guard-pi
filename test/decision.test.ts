@@ -639,3 +639,111 @@ test("AD-RULE-5: path_declaration_wins_over_allow_rule", () => {
   });
   assert.equal(d.kind, "deny_hard");
 });
+
+// ============================================================
+// authorization-classification (D2a): decide() internal derivation
+// Every auto_allow from decide() MUST carry authorization + grant_source.
+// deny_hard / prompt MUST NOT.
+// ============================================================
+
+test("T-DEC-1: read_only_read_auto_allow_carries_presumed_config_declaration", () => {
+  const policy = makePolicy({ paths: { "/etc/hosts": "read_only" } });
+  const d = decideFor({ policy, absPath: "/etc/hosts", action: "read" });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "config_declaration");
+  }
+});
+
+test("T-DEC-2: read_write_inner_auto_allow_carries_presumed_config_declaration", () => {
+  const policy = makePolicy({}, { paths: { "vendor/**": "read_write" } });
+  const d = decideFor({ policy, absPath: "/proj/vendor/a.txt", action: "write" });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "config_declaration");
+  }
+});
+
+test("T-DEC-3: allow_rule_non_sensitive_carries_presumed_allow_rule", () => {
+  const policy = makePolicy(
+    { rules: [{ tool: "bash", pattern: "git *", action: "allow" as const }] },
+  );
+  // Non-sensitive target + toolPattern matching "git *".
+  const d = decideFor({
+    policy,
+    absPath: "/proj/.git/HEAD",
+    action: "read",
+    toolName: "bash",
+    toolPattern: "git status",
+  });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "allow_rule");
+  }
+});
+
+test("T-DEC-4: inner_unconfigured_plain_write_carries_presumed_default", () => {
+  const policy = makePolicy();
+  const d = decideFor({ policy, absPath: "/proj/src/x.ts", action: "write" });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "default");
+  }
+});
+
+test("T-DEC-5: tmp_fallback_write_carries_presumed_default", () => {
+  const policy = makePolicy();
+  const d = decideFor({ policy, absPath: "/tmp/x.txt", action: "write" });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "default");
+  }
+});
+
+test("T-DEC-6: outer_non_sensitive_read_carries_presumed_default", () => {
+  const policy = makePolicy();
+  const d = decideFor({ policy, absPath: "/outside/hosts", action: "read" });
+  assert.equal(d.kind, "auto_allow");
+  if (d.kind === "auto_allow") {
+    assert.equal(d.authorization, "presumed");
+    assert.equal(d.grant_source, "default");
+  }
+});
+
+test("T-DEC-7: deny_hard_has_no_authorization_field", () => {
+  const policy = makePolicy({}, { paths: { "src/secrets.txt": "unread" } });
+  const d = decideFor({ policy, absPath: "/proj/src/secrets.txt", action: "read" });
+  assert.equal(d.kind, "deny_hard");
+  assert.equal(
+    ("authorization" in d),
+    false,
+    "deny_hard MUST NOT carry authorization",
+  );
+  assert.equal(
+    ("grant_source" in d),
+    false,
+    "deny_hard MUST NOT carry grant_source",
+  );
+});
+
+test("T-DEC-8: prompt_has_no_authorization_field", () => {
+  // Outer write/delete unconfigured non-sensitive → prompt tier=three.
+  const policy = makePolicy();
+  const d = decideFor({ policy, absPath: "/outside/x", action: "write" });
+  assert.equal(d.kind, "prompt");
+  assert.equal(
+    ("authorization" in d),
+    false,
+    "prompt MUST NOT carry authorization",
+  );
+  assert.equal(
+    ("grant_source" in d),
+    false,
+    "prompt MUST NOT carry grant_source",
+  );
+});

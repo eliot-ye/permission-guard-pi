@@ -255,3 +255,59 @@ test("AL3: routine_inner_plain_auto_allow_is_not_audited (contract)", () => {
     }),
   );
 });
+
+// ============================================================
+// authorization-classification (audit-log spec: 既有日志无字段向后兼容)
+// Verifies a JSONL line lacking the new authorization / grant_source fields
+// is accepted as-is by the audit pipeline — no error, no backfill.
+// ============================================================
+
+test("T-AUDIT-BACKCOMPAT: legacy_audit_line_without_authorization_fields_stays_unchanged", async () => {
+  await withTmpFile(async (path) => {
+    // Simulate a legacy log line (pre-authorization-classification change).
+    const legacyLine = JSON.stringify({
+      ts: "2025-01-01T00:00:00.000Z",
+      event: "allow_persistent",
+      tool: "write",
+      project: "hash1",
+      projectRoot: "/proj",
+      path: "/opt/x",
+      command: null,
+      region: "project_outer",
+      declaration: "read_write",
+      permission: "read_write",
+      toolCallId: "tc-legacy",
+    });
+    await writeFile(path, legacyLine + "\n", "utf8");
+
+    // The audit logger MUST NOT throw on legacy lines, and MUST NOT rewrite
+    // them when writing a new record.
+    const logger = createAuditLogger(path);
+    assert.doesNotThrow(() =>
+      logger.log({
+        event: "auto_allow",
+        tool: "write",
+        project: "hash1",
+        projectRoot: "/proj",
+        path: "/proj/y.ts",
+        command: null,
+        region: "project_inner",
+        declaration: "unconfigured",
+        permission: null,
+        toolCallId: "tc-new",
+        authorization: "presumed",
+        grant_source: "default",
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    const raw = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean);
+    assert.equal(raw.length, 2, "expected 2 lines: legacy + new");
+    const legacy = JSON.parse(raw[0]);
+    assert.equal("authorization" in legacy, false, "legacy line must NOT be backfilled with authorization");
+    assert.equal("grant_source" in legacy, false, "legacy line must NOT be backfilled with grant_source");
+    const fresh = JSON.parse(raw[1]);
+    assert.equal(fresh.authorization, "presumed");
+    assert.equal(fresh.grant_source, "default");
+  });
+});

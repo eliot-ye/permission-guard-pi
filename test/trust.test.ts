@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile, chmod, stat } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -422,4 +422,221 @@ test("GMP3: atomic_write_chmods_existing_trusted_json_to_0600", async () => {
       `trusted.json should be re-tightened to 0600, got ${tightened.mode.toString(8)}`,
     );
   });
+});
+
+// ============================================================
+// authorization-classification (D2b, D5): lookupGrantAuthor / lookupBashGrantAuthor
+// Covers:
+//   - session grant hit → "by_person"
+//   - persistent grant hit (explicit author) → author value
+//   - persistent grant hit (legacy, no author) → "by_person" default
+//   - bash session grant hit → "by_person"
+//   - bash persistent grant hit (explicit + legacy) → author / "by_person"
+//   - no hit → undefined
+// ============================================================
+
+test("T-TRUST-LA-1: session_grant_hit_returns_by_person", async () => {
+  await withTmpStore(async (store) => {
+    store.addSessionGrant("hash1", "read", "/abs/path");
+    assert.equal(
+      store.lookupGrantAuthor("hash1", "read", "/abs/path"),
+      "by_person",
+    );
+  });
+});
+
+test("T-TRUST-LA-2: persistent_grant_hit_returns_stored_author", async () => {
+  await withTmpStore(async (store) => {
+    await store.addPersistentGrant({
+      projectHash: "hash1",
+      action: "read",
+      path: "/abs/path",
+      permission: "read_write",
+      createdAt: new Date().toISOString(),
+      author: "by_person",
+    });
+    assert.equal(
+      store.lookupGrantAuthor("hash1", "read", "/abs/path"),
+      "by_person",
+    );
+  });
+});
+
+test("T-TRUST-LA-3: legacy_persistent_grant_no_author_defaults_to_by_person", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-trust-legacy-"));
+  try {
+    const path = join(dir, "trusted.json");
+    // Pre-write a legacy trusted.json with no author field.
+    await writeFile(
+      path,
+      JSON.stringify({
+        grants: [
+          {
+            projectHash: "hash1",
+            action: "read",
+            path: "/abs/path",
+            permission: "read_write",
+            createdAt: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+        bashGrants: [],
+      }),
+      "utf8",
+    );
+    const store = await createTrustStore(path);
+    assert.equal(
+      store.lookupGrantAuthor("hash1", "read", "/abs/path"),
+      "by_person",
+      "legacy grant without author must default to by_person per D5",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("T-TRUST-LA-4: no_hit_returns_undefined", async () => {
+  await withTmpStore(async (store) => {
+    assert.equal(store.lookupGrantAuthor("hash1", "read", "/abs/path"), undefined);
+    assert.equal(store.lookupBashGrantAuthor("hash1", "cat x"), undefined);
+  });
+});
+
+test("T-TRUST-LA-5: bash_session_grant_hit_returns_by_person", async () => {
+  await withTmpStore(async (store) => {
+    store.addBashSessionGrant("hash1", "cat /etc/hosts", "glob_expansion", "read_only");
+    assert.equal(
+      store.lookupBashGrantAuthor("hash1", "cat /etc/hosts"),
+      "by_person",
+    );
+  });
+});
+
+test("T-TRUST-LA-6: bash_persistent_grant_hit_returns_stored_author", async () => {
+  await withTmpStore(async (store) => {
+    await store.addBashPersistentGrant({
+      projectHash: "hash1",
+      commandHash: "unused",
+      rawCommand: "cat /etc/hosts",
+      reason: "glob_expansion",
+      permission: "read_only",
+      createdAt: new Date().toISOString(),
+      author: "by_person",
+    });
+    assert.equal(
+      store.lookupBashGrantAuthor("hash1", "cat /etc/hosts"),
+      "by_person",
+    );
+  });
+});
+
+// D5 scenario: 首次持久化写入带上新字段
+// 加载旧 trusted.json 后写入新 grant——写操作是全量重写整个 trusted.json，
+// 内存视图里的 migrated legacy entry 也带 author 一起落盘。
+// 这符合 spec 里"新条目带上新字段"；legacy entry 的磁盘上是否保留原样取决于
+// 是否有写入操作——本测试验证的是"有新写入的场景"。
+test("T-TRUST-W3: first_write_after_legacy_load_adds_author_to_all_entries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-trust-w3-"));
+  try {
+    const path = join(dir, "trusted.json");
+    // Pre-write legacy trusted.json (no author field).
+    await writeFile(
+      path,
+      JSON.stringify({
+        grants: [
+          {
+            projectHash: "hash1",
+            action: "read",
+            path: "/legacy/path",
+            permission: "read_write",
+            createdAt: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+        bashGrants: [],
+      }),
+      "utf8",
+    );
+
+    const store = await createTrustStore(path);
+
+    // Write a new grant without author — the store should default it.
+    await store.addPersistentGrant({
+      projectHash: "hash1",
+      action: "write",
+      path: "/new/path",
+      permission: "read_write",
+    });
+
+    // Read back the raw disk file (not the migrated in-memory view).
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    const newEntry = raw.grants.find((g: { path: string }) => g.path === "/new/path");
+    const legacyEntry = raw.grants.find((g: { path: string }) => g.path === "/legacy/path");
+    assert.equal(newEntry.author, "by_person", "new entry must carry author on disk");
+    // Legacy entry now also carries author — in-memory migration is applied at load,
+    // and the subsequent atomic write re-serializes the full view.
+    assert.equal(legacyEntry.author, "by_person", "legacy entry picked up author via in-memory migration + subsequent write");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// D5 scenario: 迁移不触发磁盘写入
+// 加载旧 trusted.json 后不调用 flush()，磁盘文件保持不变。
+test("T-TRUST-M3: migration_does_not_trigger_disk_write", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-trust-m3-"));
+  try {
+    const path = join(dir, "trusted.json");
+    const legacy = {
+      grants: [
+        {
+          projectHash: "hash1",
+          action: "read",
+          path: "/legacy/path",
+          permission: "read_write",
+          createdAt: "2025-01-01T00:00:00.000Z",
+        },
+      ],
+      bashGrants: [],
+    };
+    await writeFile(path, JSON.stringify(legacy), "utf8");
+    const before = await readFile(path, "utf8");
+
+    // Load the store — this runs the in-memory migration but MUST NOT write to disk.
+    await createTrustStore(path);
+
+    const after = await readFile(path, "utf8");
+    assert.equal(after, before, "disk file must remain byte-identical after load-only");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// D5 scenario: 新版本 trusted.json 有 author 字段保留原值
+test("T-TRUST-M2: existing_author_field_preserved_on_load", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-trust-m2-"));
+  try {
+    const path = join(dir, "trusted.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        grants: [
+          {
+            projectHash: "hash1",
+            action: "read",
+            path: "/abs/path",
+            permission: "read_write",
+            createdAt: "2025-01-01T00:00:00.000Z",
+            author: "by_person",
+          },
+        ],
+        bashGrants: [],
+      }),
+      "utf8",
+    );
+    const store = await createTrustStore(path);
+    const list = store.getAllPersistent();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].author, "by_person", "author must be preserved, not overwritten");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

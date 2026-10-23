@@ -150,6 +150,33 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
 type UserChoice = "allow_once" | "allow_session" | "allow_persistent" | "deny";
 
 /**
+ * Derive the audit-log `grant_source` for a real-human prompt decision
+ * (design.md D4). The meaning is "what source triggered this prompt" —
+ * not "where did the human's grant land" (the human IS the grantor).
+ *
+ * Mapping:
+ *   - Bash-command prompt → "bash_grant_memory" (session/persistent
+ *     bash grants land in bash command memory keyed by rawCommand).
+ *   - Path-based prompt on a config-declared path → "config_declaration"
+ *   - Path-based prompt on an unconfigured/default/sensitive_default path
+ *     → "default".
+ *
+ * Helper used only inside handlePromptDecision's audit.log call sites
+ * to keep the 7 sites consistent and readable.
+ */
+function promptGrantSource(
+  decision: Extract<Decision, { kind: "prompt" }>,
+  bashCommand: string | null,
+  bashReason: string | undefined,
+): "config_declaration" | "default" | "bash_grant_memory" {
+  if (bashCommand && bashReason) return "bash_grant_memory";
+  if (decision.declaration === "read_write" || decision.declaration === "read_only") {
+    return "config_declaration";
+  }
+  return "default";
+}
+
+/**
  * Map an extraction reason string to the permission level that should be
  * attached to a bash-command grant. Read-only-adjacent reasons get
  * `read_only`; the rest (which may involve shell forwarders or control flow
@@ -512,6 +539,8 @@ export function registerPermissionGate(
             declaration: "unread",
             permission: null,
             toolCallId: event.toolCallId,
+            // Design D3: hard_deny is a system decision → presumed.
+            authorization: "presumed",
             note: `Bash command grant bypassed: unread hard-deny for ${absPath}`,
           });
           return { block: true, reason: `Unread config overrides bash command grant for ${absPath}` };
@@ -529,6 +558,14 @@ export function registerPermissionGate(
         declaration: "unconfigured",
         permission: null,
         toolCallId: event.toolCallId,
+        // Design D2b + D4: bash grant memory hit. authorization comes from
+        // the grant's own author (persistent) or is by_person (session).
+        // Migration grants map to "presumed" (no human provenance).
+        authorization:
+          state.trust.lookupBashGrantAuthor(state.projectHash, command) === "by_person"
+            ? "by_person"
+            : "presumed",
+        grant_source: "bash_grant_memory",
         note: `bash command grant memory hit${extraction.reason ? ` (${extraction.reason})` : ""}`,
       });
       return undefined;
@@ -549,6 +586,8 @@ export function registerPermissionGate(
           declaration: "unconfigured",
           permission: null,
           toolCallId: event.toolCallId,
+          // Design D3: deny rule hit is a system decision → presumed.
+          authorization: "presumed",
           note: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
         });
         return { block: true, reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"})` };
@@ -660,6 +699,10 @@ export function registerPermissionGate(
         declaration: decision.declaration,
         permission: null,
         toolCallId: event.toolCallId,
+        // Design D3: hard_deny is a system decision → presumed. grant_source
+        // is omitted (undefined) because deny_hard has no corresponding
+        // GrantSource enum value (it's not a grant at all).
+        authorization: "presumed",
         note: decision.denial?.reason +
           (expandedInput !== absPath ? ` (resolved from ${absPath})` : ""),
       });
@@ -726,11 +769,19 @@ export function registerPermissionGate(
 
     // Check memory (session + persistent) BEFORE calling decide().
     if (hasGrant(state, action, absPath)) {
+      // Design D2b: grant memory hit → authorization comes from the Grant's
+      // own author field (persistent) or is by_person (session). grant_source
+      // is "grant_memory" for both channels.
+      // Migration grants have no human provenance → map to "presumed" for the
+      // coarse-grained Authorization axis (design.md D1).
+      const author = state.trust.lookupGrantAuthor(state.projectHash, action, absPath) ?? "by_person";
       return {
         kind: "auto_allow",
         region: inside ? "project_inner" : "project_outer",
         declaration: entry?.permission ?? "unconfigured",
         configured: !!entry,
+        authorization: author === "by_person" ? "by_person" : "presumed",
+        grant_source: "grant_memory",
         reason: `Grant memory hit for ${absPath}`,
       };
     }
@@ -823,6 +874,9 @@ export function registerPermissionGate(
         declaration: decision.declaration,
         permission,
         toolCallId: event.toolCallId,
+        // Design D3: 真人拒绝也是真人决策 → authorization = "by_person".
+        authorization: "by_person",
+        grant_source: promptGrantSource(decision, bashCommand, bashReason),
         note: isConflict
           ? `User denied a cross-source conflict prompt: ${decision.reason}`
           : decision.reason,
@@ -850,6 +904,8 @@ export function registerPermissionGate(
             ? decision.declaration
             : null,
         toolCallId: event.toolCallId,
+        authorization: "by_person",
+        grant_source: promptGrantSource(decision, bashCommand, bashReason),
         note: decision.conflict ? `Cross-source conflict: ${decision.reason}` : undefined,
       });
       return undefined;
@@ -881,6 +937,8 @@ export function registerPermissionGate(
             ? decision.declaration
             : null,
         toolCallId: event.toolCallId,
+        authorization: "by_person",
+        grant_source: promptGrantSource(decision, bashCommand, bashReason),
         note: decision.conflict ? `Cross-source conflict: ${decision.reason}` : bashCommand ? `bash command session grant (reason: ${bashReason ?? "unreliable"})` : undefined,
       });
       return undefined;
@@ -910,6 +968,8 @@ export function registerPermissionGate(
             declaration: decision.declaration,
             permission: permission as any,
             toolCallId: event.toolCallId,
+            authorization: "by_person",
+            grant_source: promptGrantSource(decision, bashCommand, bashReason),
             note: `saved to ${prettyPath(state.trust.path)}`,
           });
         } catch (err) {
@@ -932,6 +992,8 @@ export function registerPermissionGate(
             declaration: decision.declaration,
             permission: null,
             toolCallId: event.toolCallId,
+            authorization: "by_person",
+            grant_source: promptGrantSource(decision, bashCommand, bashReason),
             note: "persistent write failed, downgraded to session",
           });
         }
@@ -960,6 +1022,8 @@ export function registerPermissionGate(
             declaration: decision.declaration,
             permission: bashPermission as any,
             toolCallId: event.toolCallId,
+            authorization: "by_person",
+            grant_source: "bash_grant_memory",
             note: `bash command saved to ${prettyPath(state.trust.path)}`,
           });
         } catch (err) {
@@ -981,6 +1045,8 @@ export function registerPermissionGate(
             declaration: decision.declaration,
             permission: bashPermission as any,
             toolCallId: event.toolCallId,
+            authorization: "by_person",
+            grant_source: "bash_grant_memory",
             note: "persistent bash write failed, downgraded to session",
           });
         }

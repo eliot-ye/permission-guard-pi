@@ -21,6 +21,7 @@
 
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
+import type { Authorization, GrantSource } from "./decision.ts";
 
 export type AuditEvent =
   | "allow_once"
@@ -50,6 +51,14 @@ export interface AuditRecord {
   permission: "read_write" | "read_only" | null;
   toolCallId: string;
   note?: string;
+  // Design D3: coarse-grained authorization provenance.
+  //   "by_person" - human prompt choice (allow_once / allow_session /
+  //     allow_persistent / deny / conflict_prompt).
+  //   "presumed" - system-derived (hard_deny, auto_allow from decide()).
+  // Optional so legacy log lines (no field) keep parsing.
+  authorization?: Authorization;
+  // Design D3/D4: fine-grained source of the firing rule/memory entry.
+  grant_source?: GrantSource;
 }
 
 export interface AuditLogger {
