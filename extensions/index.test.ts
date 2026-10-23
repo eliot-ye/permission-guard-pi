@@ -102,7 +102,28 @@ async function withTmpDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   try {
     return await fn(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // Audit logger writes are fire-and-forget through an internal queue.
+    // By the time the test body returns, one or two append tasks may still
+    // be running inside fs.open/writeFile/close. fs.rm recurses bottom-up,
+    // so a stray append that lands between "unlink file" and "rmdir dir"
+    // trips ENOTEMPTY. Retry a few times to ride out the race — the queue
+    // drains within a few ms, so 5 × 20ms is plenty.
+    let cleared = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await rm(dir, { recursive: true, force: true });
+        cleared = true;
+        break;
+      } catch (err: any) {
+        if (err?.code !== "ENOTEMPTY") throw err;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    if (!cleared) {
+      // Last attempt — if this still throws, let it fail loud so we know
+      // the temp dir is leaking.
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
