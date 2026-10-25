@@ -768,13 +768,30 @@ export function registerPermissionGate(
     }
 
     // Check memory (session + persistent) BEFORE calling decide().
-    if (hasGrant(state, action, absPath)) {
+    // Dual-key lookup (V3 fix, bash-symlink-grant-key-fix): bash reliable
+    // branch stores persistent grant keyed by resolvedPath (realpath), but
+    // decideTarget's first call queries with target.path (literal) → key
+    // mismatch → persistent grant never hits → re-prompts. canonicalPath
+    // (= tryRealpath(absPath)) shares the same source function as the write-
+    // side resolvedPath, so querying canonicalPath hits the write-side key.
+    // File-tool path: write-side stores grant keyed by expandedInput (the
+    // form handlePromptDecision receives). decideTarget's first call
+    // (handleFileTool:681) passes absPath=expandedInput → key 1 (absPath)
+    // matches the write-side key directly; canonicalPath is never consulted.
+    // Second call (:683) passes absPath=resolveToAbsolute result (realpath),
+    // where canonicalPath === absPath, so dual-key is a no-op there too.
+    const grantHitPath = hasGrant(state, action, absPath)
+      ? absPath
+      : hasGrant(state, action, canonicalPath)
+        ? canonicalPath
+        : null;
+    if (grantHitPath) {
       // Design D2b: grant memory hit → authorization comes from the Grant's
       // own author field (persistent) or is by_person (session). grant_source
       // is "grant_memory" for both channels.
       // Migration grants have no human provenance → map to "presumed" for the
       // coarse-grained Authorization axis (design.md D1).
-      const author = state.trust.lookupGrantAuthor(state.projectHash, action, absPath) ?? "by_person";
+      const author = state.trust.lookupGrantAuthor(state.projectHash, action, grantHitPath) ?? "by_person";
       return {
         kind: "auto_allow",
         region: inside ? "project_inner" : "project_outer",
@@ -782,7 +799,7 @@ export function registerPermissionGate(
         configured: !!entry,
         authorization: author === "by_person" ? "by_person" : "presumed",
         grant_source: "grant_memory",
-        reason: `Grant memory hit for ${absPath}`,
+        reason: `Grant memory hit for ${grantHitPath}`,
       };
     }
 

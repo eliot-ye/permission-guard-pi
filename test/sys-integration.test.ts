@@ -573,3 +573,71 @@ test("SYS-PATH: write to non-existent relative path inside project is auto-allow
     },
   );
 });
+
+// -------- SYS-GRANT: bash symlink target persistent grant reused --------
+// Bug (V3): handleBash reliable 分支 prompt 时以 resolvedPath（realpath）存
+// 持久 grant，下次 decideTarget 第一次调用以 target.path（字面路径）查
+// hasGrant 键不匹配 → 持久 grant 永不命中 → 反复弹窗。
+// Fix: decideTarget grant 查询查 absPath || canonicalPath 两键，让 bash 链路
+// 的 canonicalPath（= resolvedPath）命中写入端键。
+test("SYS-GRANT: bash symlink target persistent grant reused on second call", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const { symlink, mkdir: mkdirP, writeFile: wf } = await import("node:fs/promises");
+      // 外区非敏感目录（sandbox 内但 project 外，避开 /tmp 兜底与 ~/.ssh 敏感）
+      const outerDir = join(projectRoot, "..", "v3target");
+      await mkdirP(outerDir, { recursive: true });
+      await wf(join(outerDir, "file.txt"), "dummy");
+      // 项目内符号链接 → 外区目录
+      const linkPath = join(projectRoot, "link_to_outer");
+      await rm(linkPath, { force: true, recursive: true }).catch(() => {});
+      await symlink(outerDir, linkPath);
+
+      let promptCount = 0;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          promptCount++;
+          return "Always allow (save to trusted.json)";
+        },
+      });
+      registerPermissionGate(pi, {
+        trustedDir,
+        configPaths: {
+          global: join(trustedDir, "..", "global", "permission.json"),
+          project: join(projectRoot, ".pi", "permission.json"),
+          local: join(projectRoot, ".pi/local/permission.json"),
+        },
+      });
+
+      const command = `truncate -s 0 ${join(linkPath, "file.txt")}`;
+
+      // 第一次：外区非敏感 write → tier=three prompt → "Always allow" 存 grant(resolvedPath)
+      promptCount = 0;
+      const r1 = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-grant-1",
+        input: { command },
+      });
+      assert.equal(promptCount, 1, "first call should prompt tier=three");
+      assert.equal(r1, undefined, "first call should be allowed (Always allow)");
+
+      // 第二次：同命令。V3 bug → 重弹（promptCount=1）。
+      // Fix → grant 命中 → auto_allow（promptCount=0, r2=undefined）。
+      promptCount = 0;
+      const r2 = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-grant-2",
+        input: { command },
+      });
+      assert.equal(promptCount, 0, "second call should NOT prompt (persistent grant hit)");
+      assert.equal(r2, undefined, "second call should auto-allow (grant memory hit)");
+
+      // Cleanup
+      await rm(linkPath, { force: true });
+    },
+  );
+});
