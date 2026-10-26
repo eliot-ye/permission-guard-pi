@@ -1565,3 +1565,135 @@ test("T-EXT-G1: path_grant_memory_hit_produces_auto_allow_decision", async () =>
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ============================================================
+// tier-contract-consistency A1: unreliable bash → tier=three with
+// "Always allow this command" (bash_grant_memory persistent grant)
+// ============================================================
+
+test("AF1-A1: unreliable bash prompt shows FOUR options (tier=three)", async () => {
+  // After A1: unreliable bash moves from tier=two to tier=three, so the
+  // prompt must offer "Always allow this command" (rawCommand persistable).
+  // Before A1 GREEN this test fails — the tier=two branch hides the
+  // "Always allow" option for bash-unreliable prompts.
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+
+    let capturedChoices: string[] | undefined;
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async (_p, choices) => {
+        capturedChoices = choices;
+        return choices.find((c) => c.toLowerCase().includes("deny")) ?? choices[0];
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // Heredoc → unreliable bash → should be tier=three (4 options)
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-a1-four",
+      input: { command: "cat <<EOF\nhello\nEOF" },
+    });
+
+    assert.ok(capturedChoices, "prompt must have been shown");
+    assert.equal(
+      capturedChoices!.length,
+      4,
+      `unreliable bash should show 4 options (tier=three); got ${capturedChoices!.length}: ${capturedChoices!.join(", ")}`,
+    );
+    assert.ok(
+      capturedChoices!.some((c) => c.toLowerCase().includes("always allow")),
+      `unreliable bash prompt must offer "Always allow"; got: ${capturedChoices!.join(", ")}`,
+    );
+  });
+});
+
+test("AF2-A1: unreliable bash \"always allow this command\" persists to bashGrants", async () => {
+  // A1 critical regression protection: after user picks "Always allow this
+  // command", a persistent bash grant must be written to trusted.json so
+  // the same rawCommand auto-allows across sessions. Without A1, tier=two
+  // never offers this option, so this test fails with no persistent grant.
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async (_p, choices) => {
+        return choices.find((c) => c.toLowerCase().includes("always allow")) ?? choices[0];
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // Fire an unreliable bash command. The uiChoice handler picks "Always allow..."
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-a1-persist",
+      input: { command: "cat $SECRETS" },
+    });
+
+    // Give the trust store time to write trusted.json
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Verify bashGrants entry was written
+    const trustPath = join(dir, "trusted.json");
+    const trustRaw = await (await import("node:fs/promises")).readFile(trustPath, "utf8").catch(() => "");
+    const trust = JSON.parse(trustRaw || "{}");
+    const bashGrants = (trust.bashGrants ?? []) as any[];
+    assert.ok(
+      bashGrants.length >= 1,
+      `expected at least 1 bash grant to be persisted after "Always allow this command"; got: ${JSON.stringify(trust)}`,
+    );
+    assert.ok(
+      bashGrants.some((g) => g.rawCommand === "cat $SECRETS"),
+      `expected bash grant for exact rawCommand 'cat $SECRETS'; got: ${JSON.stringify(bashGrants)}`,
+    );
+
+    // Verify the audit log has event=allow_persistent with grant_source=bash_grant_memory
+    const logPath = join(dir, "logs", "permission-review.jsonl");
+    const logRaw = await (await import("node:fs/promises")).readFile(logPath, "utf8").catch(() => "");
+    const lines = logRaw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-a1-persist");
+    assert.ok(rec, "audit record must exist for tc-a1-persist");
+    assert.equal(rec.event, "allow_persistent");
+    assert.equal(rec.grant_source, "bash_grant_memory");
+  });
+});

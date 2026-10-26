@@ -14,7 +14,7 @@
 1. **项目内操作静默**——`project_inner` 区域的读写操作默认 auto_allow，不打断用户工作流（`decision.ts:195-203`）
 2. **敏感路径保护**——SSH 密钥、私钥、凭证存储、系统机密文件默认弹窗或硬拒绝（`sensitive.ts` 5 条规则）
 3. **路径声明优先于敏感兜底**——用户显式配置的权限级别覆盖默认敏感规则（`decision.ts:65-133`，`access-decision` spec "权限声明优先于默认敏感兜底"）
-4. **三档弹窗分级**——tier=three 允许"总是允许"持久化授权，tier=two 仅"允许一次/会话内允许"（不持久化敏感路径）（`decision.ts:169-177`）
+4. **三档弹窗分级**——tier=three 允许"总是允许"持久化授权（含 unreliable bash 命令，可持久化 rawCommand）；tier=two 仅"允许一次/会话内允许"（不持久化 hard sensitive 与 dev-socket 外带）（`decision.ts` step 2b，`approval-flow` spec "tier=two bash 命令类无持久化" —— 已迁移至 tier=three）
 5. **配置分层与优先级**——local > project > global 三档合并，后声明者胜（`config.ts:154-158`，`permission-config` spec "优先级解析"）
 6. **授权记忆双通道**——会话级（进程内、重启失效）+ 持久化（trusted.json、跨会话），键含项目标识保证项目隔离（`grant-memory` spec "双通道记忆"）
 7. **审计日志全记录**——所有权限决策进入 JSONL 日志，串行写入保证不产生损坏行（`audit.ts:110-150`）
@@ -50,6 +50,10 @@
 7. **不做多用户权限隔离**
    - 系统假设单一用户（pi-coding-agent 运行用户）。配置和授权记忆按项目隔离（`projectHash`），但不做多用户权限隔离。同一项目下的不同用户共享相同的权限决策。
    - 验证：无 `user`、`group`、`permission` 等多用户隔离逻辑。
+
+8. **通配覆盖 sensitive 只提示不拦截**
+   - 用户配置的通配路径（如 `{"~/.ssh/**": "read_write"}`）若覆盖到内置敏感路径锚点，系统在启动时通过 `ctx.ui.notify` 提示 warning，但不拒绝该配置——用户显式配置优先。
+   - 验证：配置 `{"~/.ssh/**": "read_write"}` 启动时看到 `Pattern ~/.ssh/** from source(s) global unintentionally covers ... sensitive paths (...)` warning；精确路径 `~/.ssh/known_hosts` 不提示。`grep -n checkWildcardOverrideWarning src/lib/config.ts`。
 
 ## Known Limitations
 
@@ -137,7 +141,8 @@
 ### sensitive-path-classification
 
 **受保护什么**：
-- SSH 密钥文件（`id_rsa`、`id_dsa`、`id_ecdsa`、`id_ed25519`、`known_hosts`、`authorized_keys`、`config` in `.ssh`）
+- SSH 私钥文件（`id_rsa`、`id_dsa`、`id_ecdsa`、`id_ed25519`）与 `~/.ssh/config`——不可撤销凭证，hard 级，tier=two 无持久化
+- SSH 公钥文件（`~/.ssh/known_hosts`、`~/.ssh/authorized_keys`）——客户端公钥列表，soft 级（泄露可重生成，与 `~/.aws/config.json` 同类）
 - 私钥/证书文件（`.pem`、`.key`、`.pfx`、`.p12`、`.jks`、`.kdbx`、`.asc`、`.gpg`）
 - 环境文件与凭证存储（`.env`、`.envrc`、`.env.*` 除 `.env.example`、`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.docker`、`~/.netrc`、`~/.git-credentials`）
 - 凭证配置文件（`credentials`、`secrets.yaml`、`secrets.yml`、`secrets.json`、`.npmrc`、`.netrc`）

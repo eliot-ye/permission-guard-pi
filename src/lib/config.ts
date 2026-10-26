@@ -178,6 +178,122 @@ const SOURCE_PRIORITY: Record<Source, number> = {
   global: 1,
 };
 
+// -------- Wildcard-override warning (tier-contract-consistency A4) --------
+
+// For each (pattern, source) entry whose glob covers at least one entry in
+// HARD_SENSITIVE_ANCHORS and whose permission is not "unread", emit a
+// warning at config load time. Multiple entries with the same pattern are
+// merged into ONE warning listing the covered sources (design.md D3.2,
+// review P2-4).
+//
+// Warning message format (single-line, ≤200 chars, includes 2-3 anchor
+// samples so users immediately see WHICH sensitive paths are covered):
+//   Pattern <pattern> from source(s) <global,project> unintentionally
+//   covers 25 sensitive paths (~/.ssh/id_rsa, /etc/shadow, /tmp/.env, ...).
+//   If you intended to grant them long-term access, use a narrower pattern.
+//
+// Anchor coverage check mirrors config.resolve()'s matching logic for
+// glob entries:
+//   - entry.isRelative=false: matchesGlob(entry.pattern, anchorAbsolute)
+//     (anchor starting with ~/ is matched verbatim — entry.pattern is also
+//     unexpanded for ~; absolute anchors like /etc/shadow match directly)
+//   - entry.isRelative=true:  expand anchor to absolute (~/ → os.homedir,
+//     absolute stays), then slice off projectRoot prefix to get the
+//     project-root-relative path, then matchesGlob(entry.pattern, rel)
+//     (review P1-1: without this branch, relative globs like "**" on a
+//     project rooted at ~ would silently not warn)
+import { HARD_SENSITIVE_ANCHORS } from "./sensitive.ts";
+
+function globCoversEntry(entry: PathEntry, anchor: string, projectRoot: string): boolean {
+  // If the pattern starts with "~", we compare against the anchor verbatim
+  // (both keep the "~" prefix, so glob-matching is meaningful). For other
+  // absolute patterns (/, C:\), we compare against the fully-expanded anchor.
+  const patternStartsWithTilde = entry.pattern.startsWith("~");
+  const candidate = patternStartsWithTilde ? anchor : toKeyPath(expandHome(anchor));
+
+  if (entry.isRelative) {
+    const rootNorm = projectRoot.replace(/\\/g, "/");
+    const sep = rootNorm.endsWith("/") ? "" : "/";
+    const rootWithSep = rootNorm + sep;
+    // For isRelative matching, we always need the fully-expanded absolute
+    // anchor so we can slice off the projectRoot prefix.
+    const absNorm = toKeyPath(expandHome(anchor));
+    if (absNorm === rootNorm) return false; // can't be "inside" its own root
+    if (!absNorm.startsWith(rootWithSep)) return false;
+    return matchesGlob(entry.pattern, absNorm.slice(rootWithSep.length));
+  }
+  return matchesGlob(entry.pattern, candidate);
+}
+
+function checkWildcardOverrideWarning(
+  entries: PathEntry[],
+  projectRoot: string,
+): string[] {
+  if (!projectRoot) return [];
+
+  // Index entries by pattern; remember the sorted set of sources that
+  // share each pattern (for dedup-friendly message).
+  const byPattern = new Map<string, PathEntry[]>();
+  for (const e of entries) {
+    const arr = byPattern.get(e.pattern) ?? [];
+    arr.push(e);
+    byPattern.set(e.pattern, arr);
+  }
+
+  const warnings: string[] = [];
+  const SOURCE_ORDER = { global: 0, project: 1, local: 2 } as const;
+
+  for (const [pattern, arr] of byPattern) {
+    // Skip non-glob patterns (exact path is user intent — no warning).
+    if (!arr.some((e) => e.isGlob)) continue;
+    // Skip unread-only (same direction as sensitive — no coverage risk).
+    if (arr.every((e) => e.permission === "unread")) continue;
+
+    // Coverage check.
+    const covered: string[] = [];
+    for (const anchor of HARD_SENSITIVE_ANCHORS) {
+      if (arr.some((e) => globCoversEntry(e, anchor, projectRoot))) {
+        covered.push(anchor);
+      }
+    }
+    if (covered.length === 0) continue;
+
+    // Aggregate sources that contribute to the coverage (for message).
+    const sourcesSet = new Set<string>();
+    for (const e of arr) {
+      if (e.permission === "unread") continue; // unread is same direction, excluded
+      // Only count sources whose entry actually contributed coverage.
+      const contributed = covered.some((anchor) =>
+        globCoversEntry(e, anchor, projectRoot),
+      );
+      if (contributed) sourcesSet.add(e.source);
+    }
+    const sources = Array.from(sourcesSet).sort(
+      (a, b) => (SOURCE_ORDER as any)[a] - (SOURCE_ORDER as any)[b],
+    );
+    const samples = covered.slice(0, 3).join(", ");
+    const more = covered.length > 3 ? ", ..." : "";
+    // Include the effective permissions so users can see WHICH perms are
+    // granted by the glob. Deduplicated across sources (usually 1-2 values).
+    const permsSet = new Set<string>();
+    for (const e of arr) {
+      if (e.permission === "unread") continue;
+      const contributed = covered.some((anchor) =>
+        globCoversEntry(e, anchor, projectRoot),
+      );
+      if (contributed) permsSet.add(e.permission);
+    }
+    const perms = Array.from(permsSet).join("/");
+    warnings.push(
+      `Pattern ${pattern} from source(s) ${sources.join(",")} unintentionally ` +
+        `covers ${covered.length} sensitive paths (${samples}${more}) with ` +
+        `permission(s) ${perms}. ` +
+        `If you intended to grant them long-term access, use a narrower pattern.`,
+    );
+  }
+  return warnings;
+}
+
 export function mergePolicies(
   globalRaw: RawConfig,
   projectRaw: RawConfig,
@@ -241,6 +357,11 @@ export function mergePolicies(
   addRules(globalRaw, "global");
   addRules(projectRaw, "project");
   addRules(localRaw, "local");
+
+  // Collect wildcard-override warnings (tier-contract-consistency A4).
+  // Runs AFTER all entries are added so it can inspect the full merged
+  // policy set (all three sources together).
+  warnings.push(...checkWildcardOverrideWarning(allEntries, projectRoot));
 
   // Normalize whitespace in a bash command for pattern matching.
   const normalizeWhitespace = (s: string) => s.replace(/\s+/g, " ").trim();

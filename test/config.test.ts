@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -323,4 +323,166 @@ test("PC23: pattern_matching_semantics", () => {
   assert.ok(policy.resolveRule("read", "/tmp/app/deep.log"));
   // read pattern does not match bash command
   assert.equal(policy.resolveRule("read", "git status"), undefined);
+});
+
+// ============================================================
+// tier-contract-consistency A4: wildcard-override warning
+// on sensitive paths (design.md D3.2, permission-config spec)
+// ============================================================
+
+test("PC-WARN-A4-01: big absolute glob on ~/.ssh triggers warning", () => {
+  const global: RawConfig = {
+    paths: { "~/.ssh/**": "read_write" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(warnings.length, 1, `expected 1 warning, got ${warnings.length}: ${warnings.join(" | ")}`);
+  assert.ok(warnings[0].includes("~/.ssh/**"), "warning should mention the pattern");
+  assert.ok(warnings[0].includes("sensitive"), "warning should mention sensitive");
+});
+
+test("PC-WARN-A4-02: broad glob on ~/** triggers warning with anchor sample", () => {
+  const global: RawConfig = {
+    paths: { "~/**": "read_write" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(warnings.length, 1, `expected 1 warning, got ${warnings.length}`);
+  // Warning should include at least one anchor sample
+  const sample = warnings[0];
+  assert.ok(sample.includes("~/.ssh"), "warning should mention ~/.ssh anchor sample");
+});
+
+test("PC-WARN-A4-03: relative ** with projectRoot=real home triggers warning (P1-1)", () => {
+  // P1-1 regression: relative glob must also trigger warning when the
+  // project root is such that anchors resolve into it. Anchor ~/.ssh/id_rsa
+  // expands to <homedir>/.ssh/id_rsa; project root = homedir → relative
+  // path .ssh/id_rsa which matches **. Without the isRelative branch,
+  // this would silently not trigger.
+  const project: RawConfig = {
+    paths: { "**": "read_write" },
+  };
+  const { warnings } = mergePolicies({}, project, {}, homedir());
+  assert.equal(warnings.length, 1, `expected 1 warning for project root = homedir with **; got ${warnings.length}`);
+  assert.ok(warnings[0].includes("**"), "warning should mention the pattern");
+});
+
+test("PC-WARN-A4-04: relative * with non-home project root does NOT warn", () => {
+  // Project root is /proj — no anchor resolves under it. The relative
+  // glob * matches project files only, no sensitive paths covered.
+  const project: RawConfig = {
+    paths: { "*": "read_write" },
+  };
+  const { warnings } = mergePolicies({}, project, {}, "/proj");
+  assert.equal(warnings.length, 0, `expected 0 warnings, got ${warnings.length}: ${warnings.join(" | ")}`);
+});
+
+test("PC-WARN-A4-05: exact known_hosts path does NOT warn (not glob)", () => {
+  // Exact path (no glob) is an explicit user intent — no warning.
+  const global: RawConfig = {
+    paths: { "~/.ssh/known_hosts": "read_write" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(warnings.length, 0, `expected 0 warnings for exact path, got ${warnings.length}`);
+});
+
+test("PC-WARN-A4-06: exact id_rsa hard-sensitive path does NOT warn (not glob)", () => {
+  // Even for the most sensitive hard path, an exact match is explicit.
+  const global: RawConfig = {
+    paths: { "~/.ssh/id_rsa": "read_only" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(warnings.length, 0, `expected 0 warnings for exact id_rsa, got ${warnings.length}`);
+});
+
+test("PC-WARN-A4-07: unread on glob does NOT warn (same direction)", () => {
+  // unread is hard deny — combining with sensitive paths is user's intent
+  // to tighten, not weaken. No warning.
+  const global: RawConfig = {
+    paths: { "~/.ssh/**": "unread" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  assert.equal(warnings.length, 0, `expected 0 warnings for unread, got ${warnings.length}`);
+});
+
+test("PC-WARN-A4-08: glob not matching any anchor does NOT warn", () => {
+  // src/** relative to /proj doesn't cover any home sensitive path.
+  const project: RawConfig = {
+    paths: { "src/**": "read_write" },
+  };
+  const { warnings } = mergePolicies({}, project, {}, "/proj");
+  assert.equal(warnings.length, 0, `expected 0 warnings for src/**, got ${warnings.length}`);
+});
+
+test("PC-WARN-A4-09: multi-source same glob produces ONE merged warning (P2-4)", () => {
+  // P2-4 semantic (design.md D3.2 + review P2-4): multiple sources sharing
+  // the same pattern produce ONE merged warning listing all sources — not
+  // one warning per source (which would be spammy).
+  const global: RawConfig = {
+    paths: { "~/.ssh/**": "read_write" },
+  };
+  const project: RawConfig = {
+    paths: { "~/.ssh/**": "read_write" },
+  };
+  const { warnings } = mergePolicies(global, project, {}, "/proj");
+  assert.equal(
+    warnings.length,
+    1,
+    `expected 1 merged warning; got ${warnings.length}: ${warnings.join(" | ")}`,
+  );
+  assert.ok(warnings[0].includes("global"), "warning should mention global source");
+  assert.ok(warnings[0].includes("project"), "warning should mention project source");
+});
+
+test("PC-WARN-A4-10: warning message contains anchor samples", () => {
+  const global: RawConfig = {
+    paths: { "~/**": "read_write" },
+  };
+  const { warnings } = mergePolicies(global, {}, {}, "/proj");
+  const w = warnings[0];
+  assert.ok(w.includes("pattern"), "warning should mention pattern");
+  assert.ok(w.includes("~/**"), "warning should contain the pattern text");
+  assert.ok(w.includes("from"), "warning should mention source");
+  assert.ok(w.includes("global"), "warning should mention 'global' source");
+  assert.ok(w.includes("sensitive paths"), "warning should mention sensitive paths");
+  // Must include at least one anchor sample
+  assert.ok(w.includes("~/.ssh") || w.includes("/etc/"), "warning should include anchor sample");
+});
+
+test("PC-WARN-A4-11: relative glob with sensitive-adjacent project root triggers warning", () => {
+  // If projectRoot is inside ~/.ssh (unusual but valid), then the anchor
+  // ~/.ssh/id_rsa resolves relative to it, and a ** glob should warn.
+  const project: RawConfig = {
+    paths: { "**": "read_write" },
+  };
+  const { warnings } = mergePolicies({}, project, {}, join(homedir(), ".ssh"));
+  assert.ok(warnings.length >= 1, `expected >=1 warning for ** inside ~/.ssh, got ${warnings.length}`);
+});
+
+test("PC-WARN-A4-12: HARD_SENSITIVE_ANCHORS is exported and covers key paths", async () => {
+  // Anchor derivation structural check (design.md D3.1). Anchors must be
+  // derived from DEFAULT_SENSITIVE_RULES' `anchor` fields — single source
+  // of truth, no separate hardcoded array.
+  const { HARD_SENSITIVE_ANCHORS, DEFAULT_SENSITIVE_RULES } = await import("../src/lib/sensitive.ts");
+  assert.ok(HARD_SENSITIVE_ANCHORS.length >= 20, `expected >=20 anchors, got ${HARD_SENSITIVE_ANCHORS.length}`);
+  assert.ok(HARD_SENSITIVE_ANCHORS.includes("~/.ssh/id_rsa"), "must include id_rsa");
+  assert.ok(HARD_SENSITIVE_ANCHORS.includes("~/.ssh/config"), "must include ~/.ssh/config");
+  assert.ok(HARD_SENSITIVE_ANCHORS.includes("/etc/shadow"), "must include /etc/shadow");
+  assert.ok(HARD_SENSITIVE_ANCHORS.includes("/etc/sudoers"), "must include /etc/sudoers");
+  assert.ok(HARD_SENSITIVE_ANCHORS.includes("~/.aws/credentials"), "must include ~/.aws/credentials");
+  // Every hard rule must contribute at least one anchor
+  const hardRules = DEFAULT_SENSITIVE_RULES.filter((r) => r.level === "hard");
+  for (const rule of hardRules) {
+    assert.ok(
+      rule.anchor && rule.anchor.length >= 1,
+      `hard rule "${rule.reason}" must have at least one anchor`,
+    );
+  }
+  // Soft rules should not have anchors
+  const softRules = DEFAULT_SENSITIVE_RULES.filter((r) => r.level === "soft");
+  for (const rule of softRules) {
+    assert.equal(
+      rule.anchor,
+      undefined,
+      `soft rule "${rule.reason}" must not have anchors (not sensitive for override warning)`,
+    );
+  }
 });

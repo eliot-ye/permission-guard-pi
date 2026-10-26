@@ -7,13 +7,15 @@ import assert from "node:assert/strict";
 
 import { findSensitiveMatch, DEFAULT_SENSITIVE_RULES } from "../src/lib/sensitive.ts";
 
-test("sensitive: SSH key files (id_rsa, id_ed25519, ...)", () => {
+test("sensitive: SSH key files (id_rsa, id_ed25519, id_dsa, id_ecdsa)", () => {
+  // tier-contract-consistency A2: known_hosts and authorized_keys are
+  // now handled by the separate soft SSH public-key rule — no longer
+  // matched by the hard SSH private-key rule below. Their behaviour is
+  // covered by the SENS-A2 tests further down.
   assert.ok(findSensitiveMatch("/Users/x/.ssh/id_rsa"));
   assert.ok(findSensitiveMatch("/Users/x/.ssh/id_ed25519"));
   assert.ok(findSensitiveMatch("/Users/x/.ssh/id_dsa"));
   assert.ok(findSensitiveMatch("/Users/x/.ssh/id_ecdsa"));
-  assert.ok(findSensitiveMatch("/Users/x/.ssh/known_hosts"));
-  assert.ok(findSensitiveMatch("/Users/x/.ssh/authorized_keys"));
 });
 
 test("sensitive: SSH config inside .ssh dir", () => {
@@ -188,22 +190,110 @@ test("SENS-SOFT: hard priority beats soft on ordering boundaries", () => {
 test("SENS-SOFT: soft is the LAST rule, so hard always wins on overlap", () => {
   // Structural guard for the ordering invariant above. The behavioural cases
   // prove the invariant holds for specific paths; this proves it for the rule
-  // table as a whole — no hard rule may ever sit after the soft one, or the
+  // table as a whole — no hard rule may ever sit after a soft rule, or the
   // first-match semantics silently downgrade that hard rule to persistable.
-  const softIndex = DEFAULT_SENSITIVE_RULES.findIndex((r) => r.level === "soft");
-  assert.ok(softIndex >= 0, "the soft rule must exist");
-  assert.equal(
-    DEFAULT_SENSITIVE_RULES.length - 1,
-    softIndex,
-    "soft must be the last rule — every hard rule precedes it",
-  );
+  //
+  // NOTE (tier-contract-consistency A2): soft rules may be > 1 now (soft
+  // credential config file + soft SSH public-key files). The invariant is
+  // "soft rules form a suffix of the rule array" — not "soft is the single
+  // last rule". Every hard rule precedes every soft rule.
+  const softIndexes = DEFAULT_SENSITIVE_RULES
+    .map((r, i) => (r.level === "soft" ? i : -1))
+    .filter((i) => i >= 0);
+  assert.ok(softIndexes.length >= 1, "at least one soft rule must exist");
+  // Every rule at index >= min(softIndexes) must be soft.
+  const firstSoft = Math.min(...softIndexes);
   for (const [i, rule] of DEFAULT_SENSITIVE_RULES.entries()) {
-    if (i >= softIndex) {
+    if (i >= firstSoft) {
       assert.equal(
         rule.level,
         "soft",
-        `rule[${i}] (${rule.reason}) must not be hard once the soft rule starts`,
+        `rule[${i}] (${rule.reason}) must not be hard once the soft suffix starts`,
       );
     }
   }
+});
+
+// ============================================================
+// tier-contract-consistency A2: SSH public-key files soft downgrade
+// ============================================================
+
+test("SENS-A2: ~/.ssh/known_hosts matches as soft", () => {
+  // known_hosts is a client-side cached list of host public keys — no
+  // exfiltration risk (leak affects only the client's SSH connection
+  // warning UX). Public key files belong to soft sensitive (revocable by
+  // regenerating the cache), not hard sensitive (non-revocable private key).
+  const m = findSensitiveMatch("/Users/x/.ssh/known_hosts");
+  assert.ok(m, "~/.ssh/known_hosts should be flagged sensitive");
+  assert.equal(m?.level, "soft", "known_hosts must be soft (not hard)");
+  assert.equal(
+    m?.reason,
+    "SSH public key file",
+    "known_hosts should carry the SSH public-key soft reason",
+  );
+});
+
+test("SENS-A2: ~/.ssh/authorized_keys matches as soft", () => {
+  // authorized_keys is the client's authorized public key list. Leaking it
+  // only reveals the *client's* key fingerprints — the actual private keys
+  // never leave the client. Not a non-revocable secret.
+  const m = findSensitiveMatch("/Users/x/.ssh/authorized_keys");
+  assert.ok(m, "~/.ssh/authorized_keys should be flagged sensitive");
+  assert.equal(m?.level, "soft", "authorized_keys must be soft (not hard)");
+  assert.equal(
+    m?.reason,
+    "SSH public key file",
+    "authorized_keys should carry the SSH public-key soft reason",
+  );
+});
+
+test("SENS-A2: non-.ssh known_hosts is NOT soft", () => {
+  // The soft SSH public-key rule only fires inside ~/.ssh/ (or /.ssh/ at root).
+  // A known_hosts file elsewhere (e.g. an app's own cache) is not sensitive.
+  assert.equal(
+    findSensitiveMatch("/Users/x/myapp/known_hosts"),
+    undefined,
+    "known_hosts outside .ssh/ must NOT be flagged sensitive",
+  );
+  assert.equal(
+    findSensitiveMatch("/proj/known_hosts"),
+    undefined,
+    "known_hosts in project must NOT be flagged sensitive",
+  );
+});
+
+test("SENS-A2: ~/.ssh/id_rsa still hard after known_hosts downgrade", () => {
+  // Ordering invariant check: known_hosts is soft, id_rsa stays hard, even
+  // though they live in the same directory.
+  const id = findSensitiveMatch("/Users/x/.ssh/id_rsa");
+  assert.ok(id, "id_rsa must still be flagged");
+  assert.equal(id?.level, "hard", "id_rsa must stay hard");
+});
+
+test("SENS-A2: ~/.ssh/config still hard (not soft-SSH-public-key)", () => {
+  // ~/.ssh/config is SSH client config — it may contain connection options
+  // and key paths. Not a public key file. Stays hard via the original SSH rule.
+  const m = findSensitiveMatch("/Users/x/.ssh/config");
+  assert.ok(m, "~/.ssh/config must still be flagged");
+  assert.equal(m?.level, "hard", "~/.ssh/config must stay hard");
+});
+
+test("SENS-A2: ~/.aws/config.json still hard (soft SSH rule doesn't steal it)", () => {
+  // ~/.aws/config.json is under ~/.aws (credential store dirname). It would
+  // match the soft SSH public-key rule only if basename were 'known_hosts'
+  // or 'authorized_keys' — it's 'config.json', so soft SSH rule doesn't fire.
+  // The credential-store-dirname hard rule fires first and stays hard.
+  const m = findSensitiveMatch("/Users/x/.aws/config.json");
+  assert.ok(m, "~/.aws/config.json must still be flagged");
+  assert.equal(m?.level, "hard", "~/.aws/config.json must stay hard");
+});
+
+test("SENS-A2: authorized_keys in a non-.ssh dir is NOT sensitive", () => {
+  // authorized_keys outside ~/.ssh/ is a plain file (e.g. someone's local
+  // key list). Not sensitive.
+  assert.equal(
+    findSensitiveMatch("/Users/x/backup/authorized_keys"),
+    undefined,
+    "authorized_keys outside .ssh/ must NOT be flagged sensitive",
+  );
 });

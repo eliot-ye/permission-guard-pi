@@ -74,7 +74,7 @@
 #### Scenario: 用户变量导致不可靠
 
 - **WHEN** bash 命令为 `cat $MYSECRETS`（`MYSECRETS` 未展开）
-- **THEN** 提取结果为 `{ reliable: false, rawCommand: "..." }`，触发 tier=two 兜底弹窗
+- **THEN** 提取结果为 `{ reliable: false, rawCommand: "..." }`，触发 tier=three 弹窗（可持久化 rawCommand，见 access-decision）
 
 ### Requirement: 复杂语法导致不可靠
 
@@ -453,7 +453,7 @@ type ExtractResult =
 
 ### Requirement: 控制流关键字守卫
 
-以下 bash 控制流关键字作为**引号外独立 token**出现时 MUST 触发"不可靠"标记，整条命令走 tier=two 弹窗而非尝试解析：
+以下 bash 控制流关键字作为**引号外独立 token**出现时 MUST 触发"不可靠"标记，整条命令走 tier=three 弹窗而非尝试解析：
 
 - `while`、`do`、`done`
 - `until`
@@ -629,7 +629,7 @@ type ExtractResult =
 
 ### Requirement: 有界 glob 免不可靠标记
 
-当未加引号的 glob 通配符（`*`、`?`、`[`）满足以下全部条件时，MUST NOT 触发"不可靠"标记（即不再因 glob_expansion 走 tier=two 弹窗），而是交给后续正常提取流程按 read/write target 处理：
+当未加引号的 glob 通配符（`*`、`?`、`[`）满足以下全部条件时，MUST NOT 触发"不可靠"标记（即不再因 glob_expansion 走 tier=three 弹窗），而是交给后续正常提取流程按 read/write target 处理：
 
 1. 该 glob 元字符出现在**引号外且未被反斜杠转义**的位置（遵循现有引号感知规则）
 2. glob 元字符前的路径前缀（从命令起始到 glob 元字符之前的路径片段）MUST 完全位于 `<projectRoot>` 内部（不含 `../` 越界）。**例外**：当 glob 出现在 for 循环迭代集内（见条件 3c）且 glob 是迭代词整体（即前缀为空，如 `for x in *.log; do ...`）时，若迭代词不以 `/`、`~` 或 Windows 盘符（`C:\`）开头，空前缀 MUST 视为 bounded（cwd == projectRoot 假设下，cwd-relative glob 展开于 projectRoot 内）。若迭代词以 `/`、`~` 或 Windows 盘符开头，空前缀仍视为出界（绝对路径前缀无法 bounded 于 projectRoot）
@@ -1774,7 +1774,7 @@ type ExtractResult =
 - **WHEN** bash 命令为 `echo hi; cd /tmp && rm -rf .`
 - **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——任一复合命令片段的首个 token 为 `cd` 即触发
 
-#### Scenario: cd 后接写入目标触发 tier=two 提示
+#### Scenario: cd 后接写入目标触发 tier=three 提示
 
 - **WHEN** bash 命令为 `cd /etc && rm -rf .`，bash-target-extraction 判定为 `{ reliable: false, reason: "cd_chdir" }`
-- **THEN** access-decision 决策为 prompt，tier=two，弹窗展示完整命令文本——`cd_chdir` 属于"无法静态解析"的 bash 命令，走兜底弹窗
+- **THEN** access-decision 决策为 prompt，tier=three，弹窗展示完整命令文本——`cd_chdir` 属于"无法静态解析"的 bash 命令，走兜底弹窗

@@ -56,9 +56,11 @@ Rules in plain English:
 - Unconfigured inside project → silent for non-sensitive paths, prompt for sensitive.
 - Unconfigured outside project → silent reads, prompted writes; sensitive paths always prompt (and can never be persisted).
 
-Prompts come in two tiers: **three-tier** offers "Always allow" (persists to `trusted.json`, project-scoped by hash), **two-tier** does not. Sensitive paths outside the project, and any bash construct the extractor can't statically reason about, use two-tier. Revoke a grant by editing `trusted.json`.
+Prompts come in two tiers: **three-tier** offers "Always allow" (persists to `trusted.json`, project-scoped by hash), **two-tier** does not. Sensitive paths outside the project use two-tier. **Unreliable bash commands** (heredocs, subshells, `bash -c`, unquoted globs outside the project, …) now use three-tier so "Always allow this command" can persist the raw command across sessions; revoke by editing `trusted.json.bashGrants`. Path grants are revoked by editing `trusted.json`.
 
-Bash commands are statically parsed to extract read/write targets; anything complex (subshells, heredocs, `bash -c`, interpreters, remote tools, unquoted globs outside the project) falls through to a two-tier prompt. Silent allow is a small whitelist of dev-tool commands (`git status`/`log`/`diff`, `npm test`, `cargo check`, `tsc --noEmit`, …).
+Bash commands are statically parsed to extract read/write targets; anything complex falls through to a three-tier prompt with an "Always allow this command" option that persists the exact raw command. Silent allow is a small whitelist of dev-tool commands (`git status`/`log`/`diff`, `npm test`, `cargo check`, `tsc --noEmit`, …).
+
+When you declare a broad glob in `permission.json` (e.g. `{"~/.ssh/**": "read_write"}`) that unintentionally covers built-in sensitive paths, the extension emits a startup warning listing the covered paths and suggests narrowing the pattern. Exact paths and `unread` declarations never warn.
 
 > Full parser semantics, silent-command whitelist, and known blind spots: [`docs/security/permission-model.md`](./docs/security/permission-model.md).
 

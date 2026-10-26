@@ -258,42 +258,38 @@ async function promptUser(
   const title = `Permission request\n\n${message}`;
 
   if (tier === "three") {
-    const choice = await ctx.ui.select(
-      `${title}\n\nNote: "Always allow" saves to ${prettyPath(trustedPath)}`,
-      [
-        "Allow this call only",
-        "Allow for this session",
-        "Always allow (save to trusted.json)",
-        "Deny",
-      ],
-    );
+    const choices = bashReason
+      ? [
+          "Allow this call only",
+          "Allow for this session",
+          `Always allow this command (save to ${prettyPath(trustedPath)})`,
+          "Deny",
+        ]
+      : [
+          "Allow this call only",
+          "Allow for this session",
+          "Always allow (save to trusted.json)",
+          "Deny",
+        ];
+    const noteLine = bashReason
+      ? `\n\n${subtitle ?? ""}`
+      : `\n\nNote: "Always allow" saves to ${prettyPath(trustedPath)}`;
+    const choice = await ctx.ui.select(`${title}${noteLine}`, choices);
     if (choice === "Allow this call only") return "allow_once";
     if (choice === "Allow for this session") return "allow_session";
     if (choice.startsWith("Always allow")) return "allow_persistent";
     return "deny";
   }
 
-  // Bash-command tier=two prompts get a THIRD option: "Always allow" that
-  // writes a bash-command-scoped persistent grant. The subtitle still explains
-  // why the command cannot be auto-parsed; the extra option lets a power
-  // user persist the remember across sessions for the same raw command.
-  if (bashReason) {
-    const choice = await ctx.ui.select(
-      `${title}\n\n${subtitle ?? ""}`,
-      [
-        "Allow this call only",
-        "Allow for this session",
-        `Always allow this command (save to ${prettyPath(trustedPath)})`,
-        "Deny",
-      ],
-    );
-    if (choice === "Allow this call only") return "allow_once";
-    if (choice === "Allow for this session") return "allow_session";
-    if (choice.startsWith("Always allow")) return "allow_persistent";
-    return "deny";
-  }
-
-  // Plain tier=two (path-based, sensitive default, etc.).
+  // tier=two: path-based sensitive-default + dev-socket writes only.
+  // Never offers "Always allow" — leaking a private key or writing to a
+  // dev-socket is not recoverable by rotating a token, so persisting the
+  // permission would be a permanent hole.
+  //
+  // NOTE (tier-contract-consistency A1): the previous bash-command tier=two
+  // special branch (which offered "Always allow this command") has been
+  // removed. Unreliable bash commands now route through tier=three with a
+  // dedicated "Always allow this command" option (above). See design.md A1.
   const footer = subtitle
     ? `${subtitle}`
     : `No "Always allow" option available for this context.`;
@@ -604,7 +600,14 @@ export function registerPermissionGate(
         region: "project_outer",
         declaration: "unconfigured",
         configured: false,
-        tier: "two",
+        // tier=three (tier-contract-consistency A1): unreliable bash commands
+        // offer "Always allow this command" (rawCommand persistable). The
+        // tier label now aligns 1:1 with persistability capability:
+        //   tier=three → offer "Always allow"
+        //   tier=two   → never offer "Always allow" (sensitive-default + dev-socket)
+        // Before A1 this was hardcoded "two" with a tier=two + bashReason
+        // special-case branch in promptUser to fake the persistable option.
+        tier: "three",
         reason: `Bash command could not be reliably parsed${extraction.reason ? ` (${extraction.reason})` : ""}; approval required for the full command below`,
       };
       return handlePromptDecision(
@@ -843,20 +846,24 @@ export function registerPermissionGate(
 
     const trustedPath = join(state.trust.path);
 
-    // Dispatch tier=two subtitle by decision source (design.md D5). The
-    // subtitle gives the user a clear remediation path that matches the
-    // actual context — the old hard-coded "unconfigured paths" text was
-    // misleading for both outer-sensitive-path and bash-unreliable sources.
+    // Dispatch subtitle by decision source (design.md D5). The subtitle
+    // gives the user a clear remediation path that matches the actual
+    // context. tier=three bash prompts dispatch by extraction reason;
+    // tier=two prompts dispatch by whether it's a sensitive path or dev-socket.
+    //
+    // NOTE (tier-contract-consistency A1): the bash-command subtitle branch
+    // moved from tier=two to tier=three because unreliable bash now routes
+    // through tier=three (offer "Always allow this command"). The tier=two
+    // branch is now strictly for sensitive-default paths and dev-socket writes.
     let subtitle: string | undefined;
-    if (decision.tier === "two") {
-      if (bashCommand && bashReason) {
-        // Bash-command class prompt: dispatch by extraction reason.
-        subtitle = bashSubtitleForReason(bashReason);
-      } else if (bashCommand) {
-        // Fallback: old-style bash prompt (should not happen post-change).
-        subtitle = "命令无法静态解析，请审阅整条命令；无法通过配置持久化。";
-      } else if (decision.declaration === "sensitive_default") {
+    if (decision.tier === "three" && bashCommand && bashReason) {
+      // Bash-command class prompt: dispatch by extraction reason.
+      subtitle = bashSubtitleForReason(bashReason);
+    } else if (decision.tier === "two") {
+      if (decision.declaration === "sensitive_default") {
         subtitle = "敏感系统路径不能持久化，如需长期允许请编辑 permission.json。";
+      } else if (decision.reason.startsWith("Network exfiltration")) {
+        subtitle = "网络外带路径不能持久化，每次写入都需确认。";
       }
     }
 
