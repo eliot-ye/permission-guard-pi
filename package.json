@@ -16,13 +16,13 @@
   "author": "Eliot <eliot_ye@163.com>",
   "type": "module",
   "main": "extensions/index.ts",
-  "homepage": "https://atomgit.com/eliot-ye/permission-guard-pi#readme",
+  "homepage": "https://github.com/eliot-ye/permission-guard-pi#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://atomgit.com/eliot-ye/permission-guard-pi.git"
+    "url": "https://github.com/eliot-ye/permission-guard-pi"
   },
   "bugs": {
-    "url": "https://atomgit.com/eliot-ye/permission-guard-pi/issues"
+    "url": "https://github.com/eliot-ye/permission-guard-pi/issues"
   },
   "files": [
     "extensions/index.ts",
