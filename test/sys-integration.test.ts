@@ -641,3 +641,465 @@ test("SYS-GRANT: bash symlink target persistent grant reused on second call", as
     },
   );
 });
+
+// ============================================================
+// sensitive-soft-pardonable-set: cross-subsystem integration
+// Boundary: sensitive-path-classification × access-decision × grant-memory
+// Verifies the full pipeline end-to-end: sensitive.level → decide() tier
+// dispatch → promptUser option gating → addPersistentGrant / no-grant.
+// ============================================================
+
+test("SYS-SOFT: soft outer config.yml read prompts tier three and persists", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+      // Outer, non-hard path whose basename matches soft (<name>.<ext>).
+      // dirname is the sandbox root — no .ssh/.aws overlap, so soft wins.
+      const configYml = join(projectRoot, "..", "config.yml");
+      let choices: string[] = [];
+
+      // Session 1: first read → tier=three prompt, "Always allow" offered.
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Always allow (save to trusted.json)";
+        },
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      const r1 = await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "read",
+        toolCallId: "tc-soft-1",
+        input: { path: configYml },
+      });
+      assert.equal(r1, undefined, "first read allowed");
+      assert.ok(
+        choices.some((c) => c.startsWith("Always allow")),
+        `soft outer read must offer "Always allow" (tier=three), got: ${choices}`,
+      );
+      // Let async trusted.json writes flush before the next session loads it.
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Session 2: fresh handler + fresh state, same disk → the persistent
+      // grant must hit and auto-allow WITHOUT prompting.
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          throw new Error("should not prompt (persistent grant hit)");
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      const r2 = await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "read",
+        toolCallId: "tc-soft-2",
+        input: { path: configYml },
+      });
+      assert.equal(r2, undefined, "second read auto-allows from persistent grant");
+    },
+  );
+});
+
+test("SYS-SOFT: soft outer config.yml write also persists across sessions", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+      const configYml = join(projectRoot, "..", "config.yml");
+      let choices: string[] = [];
+
+      // decide() step 2b is action-agnostic, so soft loosens outer WRITE
+      // together with read — tier=three, "Always allow" available.
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Always allow (save to trusted.json)";
+        },
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      const r1 = await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "write",
+        toolCallId: "tc-soft-w1",
+        input: { path: configYml, content: "x" },
+      });
+      assert.equal(r1, undefined, "outer write allowed");
+      assert.ok(
+        choices.some((c) => c.startsWith("Always allow")),
+        `soft outer write must offer "Always allow" (tier=three), got: ${choices}`,
+      );
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Second session, mirroring the read-side test: proves the write grant
+      // actually landed on disk. Asserting only the offered option would let a
+      // write-path `addPersistentGrant` regression pass silently.
+      let prompted = false;
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompted = true;
+          return "Deny";
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      const r2 = await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "write",
+        toolCallId: "tc-soft-w2",
+        input: { path: configYml, content: "x" },
+      });
+      assert.equal(r2, undefined, "second write auto-allows from the persistent grant");
+      assert.equal(prompted, false, "no second prompt: the write grant persisted");
+    },
+  );
+});
+
+test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+
+      // (b) id_rsa outer READ: tier=two → no "Always allow" option.
+      let choices: string[] = [];
+      let hardChoices: string[] = [];
+      const softOuter = join(projectRoot, "..", "app", "auth.json");
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Allow for this session";
+        },
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "read",
+        toolCallId: "tc-hard-1",
+        input: { path: "/Users/x/.ssh/id_rsa" },
+      });
+      assert.equal(
+        choices.some((c) => c.startsWith("Always allow")),
+        false,
+        `hard outer read must NOT offer "Always allow" (tier=two), got: ${choices}`,
+      );
+      await new Promise((r) => setTimeout(r, 100));
+
+      // New session: the session grant is NOT persisted for tier=two, so the
+      // prompt must reappear. (Contrast with the soft case above, which does
+      // not re-prompt.)
+      let promptCount = 0;
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          promptCount++;
+          return "Allow this call only";
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "read",
+        toolCallId: "tc-hard-2",
+        input: { path: "/Users/x/.ssh/id_rsa" },
+      });
+      assert.equal(
+        promptCount,
+        1,
+        "hard outer read must re-prompt in a new session (never persisted)",
+      );
+
+      // (c) ~/.ssh/config: no extension → not soft → still hard (tier=two).
+      choices = [];
+      const s3 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Allow this call only";
+        },
+      });
+      registerPermissionGate(s3.pi, { trustedDir, configPaths });
+      await fireToolCall(s3.pi, s3.ctx, {
+        toolName: "read",
+        toolCallId: "tc-hard-3",
+        input: { path: "/Users/x/.ssh/config" },
+      });
+      assert.equal(
+        choices.some((c) => c.startsWith("Always allow")),
+        false,
+        `~/.ssh/config (hard) must NOT offer "Always allow", got: ${choices}`,
+      );
+
+      // (e) id_rsa outer WRITE: still tier=two, no "Always allow".
+      choices = [];
+      const s4 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Allow for this session";
+        },
+      });
+      registerPermissionGate(s4.pi, { trustedDir, configPaths });
+      await fireToolCall(s4.pi, s4.ctx, {
+        toolName: "write",
+        toolCallId: "tc-hard-4",
+        input: { path: "/Users/x/.ssh/id_rsa", content: "x" },
+      });
+      assert.equal(
+        choices.some((c) => c.startsWith("Always allow")),
+        false,
+        `hard outer write must NOT offer "Always allow" (tier=two), got: ${choices}`,
+      );
+
+      // (f) id_rsa outer DELETE: still tier=two, no "Always allow". Delete is
+      // only reachable via bash (`rm`) — the file-tool path derives
+      // read|write only (extensions/index.ts:679) — so this asserts the
+      // sensitive fallback over a real extracted delete target. Contrasts with
+      // the soft delete case below: same rm shape, opposite tier.
+      hardChoices = [];
+      const s5 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          hardChoices = c;
+          return "Allow for this session";
+        },
+      });
+      registerPermissionGate(s5.pi, { trustedDir, configPaths });
+      await fireToolCall(s5.pi, s5.ctx, {
+        toolName: "bash",
+        toolCallId: "tc-hard-5",
+        input: { command: "rm -f /Users/x/.ssh/id_rsa" },
+      });
+      assert.equal(
+        hardChoices.some((c) => c.startsWith("Always allow")),
+        false,
+        `hard outer delete must NOT offer "Always allow" (tier=two), got: ${hardChoices}`,
+      );
+
+      // (g) soft outer DELETE: tier=three, and the "Always allow" command
+      // grant actually persists — this is the accepted-delete decision, so
+      // the integration layer pins it too, not only the DEC layer.
+      choices = [];
+      const s6 = createMockPi({
+        projectRoot,
+        uiChoice: async (_p, c) => {
+          choices = c;
+          return "Always allow this command";
+        },
+      });
+      registerPermissionGate(s6.pi, { trustedDir, configPaths });
+      await fireToolCall(s6.pi, s6.ctx, {
+        toolName: "bash",
+        toolCallId: "tc-soft-6",
+        input: { command: `rm -f ${softOuter}` },
+      });
+      assert.equal(
+        choices.some((c) => c.startsWith("Always allow")),
+        true,
+        `soft outer delete must offer "Always allow" (tier=three), got: ${choices}`,
+      );
+      await new Promise((r) => setTimeout(r, 100));
+      const storeDel = JSON.parse(
+        await readFile(join(trustedDir, "trusted.json"), "utf8"),
+      ) as {
+        grants: Array<{ action: string; path: string }>;
+        bashGrants?: Array<{ rawCommand: string }>;
+      };
+      // Bash grants land in bashGrants (command hash), not the path-grant
+      // list — the reliable path here still carries `rm -f <path>`, so assert
+      // on whichever store recorded this exact command.
+      const cmd = `rm -f ${softOuter}`;
+      assert.ok(
+        storeDel.grants.some((g) => g.action === "delete" && g.path === softOuter) ||
+          (storeDel.bashGrants ?? []).some((g) => g.rawCommand === cmd),
+        "soft outer delete persist wrote a grant for this command",
+      );
+    },
+  );
+});
+
+// ---- 4.3-a: explicit config declaration beats the soft sensitive fallback ----
+
+test("SYS-SOFT-DECL: explicit config declaration overrides soft sensitive", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      // The user has spoken: this exact path is read_only. decide() step 1
+      // (config declaration) precedes step 2b (sensitive fallback), so the
+      // declaration must win and the read auto-allow — soft must not re-prompt
+      // a path the user has explicitly authorized.
+      await writeFile(
+        globalConfig,
+        JSON.stringify({ paths: { "/declared/config.json": "read_only" } }),
+      );
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+      let prompted = false;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompted = true;
+          return "Deny";
+        },
+      });
+      registerPermissionGate(pi, { trustedDir, configPaths });
+      const r = await fireToolCall(pi, ctx, {
+        toolName: "read",
+        toolCallId: "tc-soft-decl",
+        input: { path: "/declared/config.json" },
+      });
+      assert.equal(r, undefined, "declared read_only read auto-allows");
+      assert.equal(
+        prompted,
+        false,
+        "no prompt: config declaration beats soft sensitive fallback",
+      );
+    },
+  );
+});
+
+// ---- 4.3-b: revoking the soft persistent grant re-prompts ----
+
+test("SYS-SOFT-REVOKE: revoking the soft persistent grant re-prompts", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+      const configJson = join(projectRoot, "..", "config.json");
+      const trustPath = join(trustedDir, "trusted.json");
+
+      // Session 1: persist the grant.
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async () => "Always allow (save to trusted.json)",
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "read",
+        toolCallId: "tc-revoke-1",
+        input: { path: configJson },
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      const store = JSON.parse(await readFile(trustPath, "utf8"));
+      assert.ok(store.grants.length > 0, "grant written to trusted.json");
+
+      // Revocation path documented in spec: the user edits trusted.json
+      // directly and removes the entry.
+      store.grants = [];
+      await writeFile(trustPath, JSON.stringify(store, null, 2));
+
+      // Session 2: no grant on disk → the soft prompt must reappear. Contrast
+      // with the tier=two hard case, where a session grant is also dropped
+      // between sessions — but there it is dropped because tier=two never
+      // wrote one in the first place.
+      let promptCount = 0;
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          promptCount++;
+          return "Allow this call only";
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "read",
+        toolCallId: "tc-revoke-2",
+        input: { path: configJson },
+      });
+      assert.equal(promptCount, 1, "revoked grant must re-prompt");
+    },
+  );
+});
+
+// ---- 4.3-c: grant keyed by file, never widened to its directory ----
+
+test("SYS-SOFT-FILE: soft persistent grant is keyed by file, not directory", async () => {
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const { mkdir: mkdirP } = await import("node:fs/promises");
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+      // Two soft files in one outer directory. Granting one must NOT widen to
+      // the other — the grant key is the full path.
+      const outerDir = join(projectRoot, "..", "softcfg");
+      await mkdirP(outerDir, { recursive: true });
+      const configJson = join(outerDir, "config.json");
+      const authJson = join(outerDir, "auth.json");
+
+      // Session 1: persist a grant for config.json only.
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async () => "Always allow (save to trusted.json)",
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "read",
+        toolCallId: "tc-file-1",
+        input: { path: configJson },
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Session 2: config.json auto-allows; the sibling auth.json must still
+      // prompt despite sharing the directory.
+      let promptCount = 0;
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          promptCount++;
+          return "Allow this call only";
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      const r1 = await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "read",
+        toolCallId: "tc-file-2",
+        input: { path: configJson },
+      });
+      assert.equal(r1, undefined, "granted file auto-allows");
+      assert.equal(promptCount, 0, "granted file must NOT prompt");
+
+      await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "read",
+        toolCallId: "tc-file-3",
+        input: { path: authJson },
+      });
+      assert.equal(
+        promptCount,
+        1,
+        "sibling soft file in the same dir must still prompt (no dir widening)",
+      );
+    },
+  );
+});

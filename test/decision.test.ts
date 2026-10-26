@@ -747,3 +747,102 @@ test("T-DEC-8: prompt_has_no_authorization_field", () => {
     "prompt MUST NOT carry grant_source",
   );
 });
+
+// ============================================================
+// sensitive-soft-pardonable-set: soft/pardonable tier dispatch
+// ============================================================
+
+test("DEC-SOFT: soft outer read prompts tier three", () => {
+  // Was silent auto_allow (outer non-sensitive read). Soft tier=three closes
+  // the credential-leak blind spot, and stays persistable.
+  const d = decideFor({ policy: makePolicy(), absPath: "/Users/x/.config/gh/config.yml" });
+  assert.equal(d.kind, "prompt");
+  assert.equal(d.tier, "three");
+  assert.equal(d.declaration, "sensitive_default");
+});
+
+test("DEC-SOFT: soft outer write and delete prompt tier three", () => {
+  // decide() step 2b is action-agnostic, so soft loosens outer WRITE and
+  // DELETE together with read — all three were tier=two non-persistable for
+  // sensitive paths before this change. The persistability trade (revocable
+  // credentials, proposal 范围说明) is asserted for every action in decide()'s
+  // Action union, not just read/write — otherwise a future `action ===
+  // "delete"` branch in step 2b would land with no test pinning the soft side.
+  for (const action of ["write", "delete"] as const) {
+    const d = decideFor({
+      policy: makePolicy(),
+      absPath: "/Users/x/.config/gh/config.yml",
+      action,
+    });
+    assert.equal(d.kind, "prompt");
+    assert.equal(d.tier, "three", `soft outer ${action} must be tier=three`);
+  }
+});
+
+test("DEC-SOFT: soft inner read, write and delete prompt tier three", () => {
+  for (const action of ["read", "write", "delete"] as const) {
+    const d = decideFor({
+      policy: makePolicy(),
+      absPath: "/proj/config.json",
+      action,
+    });
+    assert.equal(d.kind, "prompt");
+    assert.equal(d.tier, "three", `soft inner ${action} must be tier=three`);
+  }
+});
+
+test("DEC-SOFT: soft auth.json outer read prompts tier three", () => {
+  // Covers the soft basename set beyond "config" — auth.* is the canonical
+  // credential file name (e.g. ~/.config/app/auth.json).
+  const d = decideFor({ policy: makePolicy(), absPath: "/Users/x/.config/app/auth.json" });
+  assert.equal(d.kind, "prompt");
+  assert.equal(d.tier, "three");
+  assert.equal(d.declaration, "sensitive_default");
+});
+
+test("DEC-SOFT: ordering boundary keeps hard tier two at decision level", () => {
+  // The ordering invariant (design.md Decision 3) is the security-critical
+  // path of this change: if a hard rule ever got reordered after the soft one,
+  // findSensitiveMatch's first-match would hand it back as soft, and decide()
+  // would turn an outer read of ~/.aws/config.json into tier=three
+  // persistable. That is a leak widening that the classification-level test
+  // alone cannot catch — this asserts the DECISION the boundary produces.
+  //
+  // Covers the two overlapping shapes named in design.md Decision 3.
+  const dAws = decideFor({ policy: makePolicy(), absPath: "/Users/x/.aws/config.json" });
+  assert.equal(dAws.kind, "prompt");
+  assert.equal(dAws.tier, "two", "~/.aws/config.json must stay tier=two at decision level");
+
+  const dPem = decideFor({ policy: makePolicy(), absPath: "/proj/config.pem" });
+  assert.equal(dPem.kind, "prompt");
+  assert.equal(dPem.tier, "three", "config.pem inner stays tier=three (hard inner)");
+});
+
+test("DEC-SOFT: hard outer read, write and delete stay tier two", () => {
+  // Non-revocable private key: outer read, write AND delete stay
+  // non-persistable. decide()'s Action type is "read" | "write" | "delete",
+  // so all three are exercised — step 2b does not branch on action, and a
+  // partial loop would leave `delete` unverified.
+  for (const action of ["read", "write", "delete"] as const) {
+    const d = decideFor({
+      policy: makePolicy(),
+      absPath: "/Users/x/.ssh/id_rsa",
+      action,
+    });
+    assert.equal(d.kind, "prompt");
+    assert.equal(d.tier, "two", `hard outer ${action} must stay tier=two`);
+  }
+});
+
+test("DEC-SOFT: hard inner read, write and delete stay tier three", () => {
+  // In-project sensitive: unchanged (tier=three, persistable).
+  for (const action of ["read", "write", "delete"] as const) {
+    const d = decideFor({
+      policy: makePolicy(),
+      absPath: "/proj/secret.pem",
+      action,
+    });
+    assert.equal(d.kind, "prompt");
+    assert.equal(d.tier, "three", `hard inner ${action} must stay tier=three`);
+  }
+});

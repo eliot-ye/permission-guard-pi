@@ -231,21 +231,34 @@ export function decide(opts: {
     };
   }
 
-  // 2b. Sensitive-path fallback (both inner and outer, split by tier).
-  //   - Inner sensitive: prompt tier=three - user gets a chance to persist
-  //     authorization, since inner paths are within their own project scope.
-  //   - Outer sensitive: prompt tier=two - no "Always allow", because we
-  //     don't persist grants to system-sensitive paths.
+  // 2b. Sensitive-path fallback (both inner and outer, split by level and tier).
+  //   - soft sensitive (revocable credential config): tier=three regardless of
+  //     region — "Always allow" persists, so the prompt stops repeating after
+  //     the first approval. decide() does NOT branch on `action` here, so
+  //     outer WRITE and DELETE are loosened together with read (proposal
+  //     范围说明). Known boundary: a persisted soft DELETE grant cannot be
+  //     recovered by rotating a token (the file is gone), unlike the read/
+  //     write grants the "revocable" argument covers — accepted by design.
+  //   - hard sensitive (non-revocable private key):
+  //       * inner  → tier=three, user may persist since the path is inside
+  //         their own project scope;
+  //       * outer  → tier=two, no "Always allow" — a leaked private key cannot
+  //         be recovered by rotating a token.
   // An explicit config declaration (step 1) takes precedence over this
   // fallback - if the user declares `read_only` or `unread` for an inner
   // sensitive path, that declaration wins.
   if (sensitive) {
+    // Soft is revocable, so it is persistable everywhere — including delete,
+    // per the accepted boundary noted above. Hard is only persistable inside
+    // the user's own project scope.
+    const tier: PromptTier =
+      sensitive.level === "soft" ? "three" : isInside ? "three" : "two";
     return {
       kind: "prompt",
       region,
       declaration: "sensitive_default",
       configured: false,
-      tier: isInside ? "three" : "two",
+      tier,
       reason: `Sensitive file (${sensitive.reason}): ${absPath}`,
     };
   }

@@ -6,9 +6,25 @@
 
 import { dirname, basename } from "node:path";
 
+// Soft (pardonable) credential-config matching vocabulary. Hoisted to module
+// scope so the 16-way basename comparison below allocates nothing per call —
+// findSensitiveMatch runs on every tool call, including per target in a bash
+// extraction sweep.
+const SOFT_CONFIG_NAMES = ["config", "auth", "settings", "models"];
+const SOFT_CONFIG_EXTS = [".json", ".toml", ".yml", ".yaml"];
+
 export interface SensitiveRule {
   test: (absolutePath: string) => boolean;
   reason: string;
+  // "hard"  = non-revocable credential (private key): outer stays tier=two,
+  //           no "Always allow" — a leak is not recoverable by rotating a
+  //           token.
+  // "soft"  = revocable credential config (apikey/token): tier=three anywhere,
+  //           so "Always allow" persists and stops re-prompting after the first
+  //           prompt. Ordering invariant: soft rules are appended AFTER every
+  //           hard rule, so findSensitiveMatch's first-match keeps hard
+  //           priority on overlaps (see design.md Decision 3).
+  level: "hard" | "soft";
 }
 
 export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
@@ -28,6 +44,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "SSH key file",
+    level: "hard",
   },
   {
     test: (p) => {
@@ -44,6 +61,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "Private key / certificate file",
+    level: "hard",
   },
   {
     test: (p) => {
@@ -70,6 +88,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       return false;
     },
     reason: "Env file or credential store",
+    level: "hard",
   },
   {
     test: (p) => {
@@ -84,6 +103,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "Credential config",
+    level: "hard",
   },
   {
     // bash-hardening-round-2 (L4a): system credential/config files under /etc.
@@ -123,6 +143,34 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "System credential/config file",
+    level: "hard",
+  },
+  {
+    // Pardonable credential configs. CLI tools conventionally store their
+    // apikey/token in a file named config|auth|settings|models with a
+    // credential-format extension. These are REVOCABLE — a leaked token can be
+    // rotated — unlike a private key, so this level is tier=three (persistable
+    // via "Always allow") instead of tier=two.
+    //
+    // Matching is EXACT on the `<name>.<ext>` shape: bare "config" without an
+    // extension does NOT match, so ~/.ssh/config stays hard through the SSH
+    // rule above. Code extensions (.ts/.js/.py) are excluded — otherwise every
+    // in-project config.ts module would start prompting.
+    //
+    // APPENDED LAST (ordering invariant, design.md Decision 3):
+    // findSensitiveMatch returns the FIRST match, so hard rules placed before
+    // this one win on overlaps — ~/.aws/config.json stays hard via the
+    // ".aws" dirname rule, config.pem stays hard via the private-key
+    // extension rule. Placing soft first would silently downgrade those to
+    // tier=three persistable and widen the leak surface.
+    test: (p) => {
+      const b = basename(p).toLowerCase();
+      return SOFT_CONFIG_NAMES.some((n) =>
+        SOFT_CONFIG_EXTS.some((e) => b === `${n}${e}`),
+      );
+    },
+    reason: "Soft credential config file",
+    level: "soft",
   },
 ];
 

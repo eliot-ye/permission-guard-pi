@@ -39,6 +39,8 @@
 
 **替代方案（`findSensitiveMatch` 后加 wrapper 分派 tier）**：重复 `decide()` 已有 tier 逻辑，破坏决策引擎内聚。否决。
 
+**跨分系统不变式（架构 review warning-1 显式化）**：soft→tier=three 即可持久化赦免的正确性，依赖 `promptUser`（`extensions/index.ts:260,296-307`）的"总是允许"选项**纯由 `decision.tier` 门控**、`handlePromptDecision` 的 `allow_persistent` 分支（`:966-975`）直调 `addPersistentGrant` 无 sensitive 二次门控。约束：`promptUser` MUST NOT 引入独立 sensitive 检查屏蔽持久化选项；soft sensitive 外区持久化赖此不变式。未来若需对某类敏感加独立门控，必须显式改 grant-memory spec，不得静默加 `if (sensitive && outer)` 分支。
+
 ### Decision 3：soft 集合文件名 + 扩展名选择
 
 **选择**：basename `config`/`auth`/`settings`/`models` + 扩展名 `.json`/`.toml`/`.yml`/`.yaml`（精确 `<name>.<ext>` 形态匹配）。
@@ -50,6 +52,8 @@
 **替代方案 B（加 `.ini`/`.conf`）**：`.ini`/`.conf` 也是配置格式但更宽泛（项目内 `config.ini` 常见），噪音风险高。暂不加，留待用户反馈。
 
 **`~/.ssh/config` 边界**：soft 要求扩展名，`config` 无扩展名不命中 soft；`~/.ssh/config` 仍由 hard SSH key 规则（`b === "config" && d.endsWith("/.ssh")`）覆盖。两规则不冲突。
+
+**规则排序不变式（架构 review warning-2 显式化）**：`findSensitiveMatch` 按数组序首匹配返回（`sensitive.ts:129-133`）。soft 规则集 MUST 追加于所有 hard 规则**之后**，保证 hard 优先命中——如 `~/.aws/config.json`（hard 凭证目录规则按 dirname 命中）、`config.pem`（hard 私钥扩展名规则命中）均靠排序保 hard，不得因 soft 规则前置而被降级为 tier=three 可持久化。
 
 ## Risks / Trade-offs
 
