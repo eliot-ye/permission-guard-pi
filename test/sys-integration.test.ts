@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import { registerPermissionGate } from "../extensions/index.ts";
@@ -586,58 +586,65 @@ test("SYS-GRANT: bash symlink target persistent grant reused on second call", as
       await writeFile(globalConfig, "{}");
     },
     async ({ projectRoot, trustedDir }) => {
-      const { symlink, mkdir: mkdirP, writeFile: wf } = await import("node:fs/promises");
-      // 外区非敏感目录（sandbox 内但 project 外，避开 /tmp 兜底与 ~/.ssh 敏感）
-      const outerDir = join(projectRoot, "..", "v3target");
-      await mkdirP(outerDir, { recursive: true });
-      await wf(join(outerDir, "file.txt"), "dummy");
+      const { symlink, writeFile: wf } = await import("node:fs/promises");
+      // 外区非敏感目录必须真正落在 /tmp 之外：Linux CI 的 tmpdir()=/tmp，
+      // 若 outerDir 仍在 sandbox（/tmp/pi-sys-*）下，decision step 2c 的
+      // isDefaultTmpPath 会把这条外区 write 当成 scratch 写入自动放行，
+      // 第一次就不弹窗，V3 grant-key 修复无从验证。改用 homedir 下独立
+      // mkdtemp：不在 /tmp、非敏感（无 .ssh/.aws 等凭证目录）。它在
+      // sandbox 之外，withSandbox 的 rm(root) 不会回收，需 try/finally 清理。
+      const outerDir = await mkdtemp(join(homedir(), "pi-sys-grant-"));
       // 项目内符号链接 → 外区目录
       const linkPath = join(projectRoot, "link_to_outer");
-      await rm(linkPath, { force: true, recursive: true }).catch(() => {});
-      await symlink(outerDir, linkPath);
+      try {
+        await wf(join(outerDir, "file.txt"), "dummy");
+        await rm(linkPath, { force: true, recursive: true }).catch(() => {});
+        await symlink(outerDir, linkPath);
 
-      let promptCount = 0;
-      const { pi, ctx } = createMockPi({
-        projectRoot,
-        uiChoice: async () => {
-          promptCount++;
-          return "Always allow (save to trusted.json)";
-        },
-      });
-      registerPermissionGate(pi, {
-        trustedDir,
-        configPaths: {
-          global: join(trustedDir, "..", "global", "permission.json"),
-          project: join(projectRoot, ".pi", "permission.json"),
-          local: join(projectRoot, ".pi/local/permission.json"),
-        },
-      });
+        let promptCount = 0;
+        const { pi, ctx } = createMockPi({
+          projectRoot,
+          uiChoice: async () => {
+            promptCount++;
+            return "Always allow (save to trusted.json)";
+          },
+        });
+        registerPermissionGate(pi, {
+          trustedDir,
+          configPaths: {
+            global: join(trustedDir, "..", "global", "permission.json"),
+            project: join(projectRoot, ".pi", "permission.json"),
+            local: join(projectRoot, ".pi/local/permission.json"),
+          },
+        });
 
-      const command = `truncate -s 0 ${join(linkPath, "file.txt")}`;
+        const command = `truncate -s 0 ${join(linkPath, "file.txt")}`;
 
-      // 第一次：外区非敏感 write → tier=three prompt → "Always allow" 存 grant(resolvedPath)
-      promptCount = 0;
-      const r1 = await fireToolCall(pi, ctx, {
-        toolName: "bash",
-        toolCallId: "tc-grant-1",
-        input: { command },
-      });
-      assert.equal(promptCount, 1, "first call should prompt tier=three");
-      assert.equal(r1, undefined, "first call should be allowed (Always allow)");
+        // 第一次：外区非敏感 write → tier=three prompt → "Always allow" 存 grant(resolvedPath)
+        promptCount = 0;
+        const r1 = await fireToolCall(pi, ctx, {
+          toolName: "bash",
+          toolCallId: "tc-grant-1",
+          input: { command },
+        });
+        assert.equal(promptCount, 1, "first call should prompt tier=three");
+        assert.equal(r1, undefined, "first call should be allowed (Always allow)");
 
-      // 第二次：同命令。V3 bug → 重弹（promptCount=1）。
-      // Fix → grant 命中 → auto_allow（promptCount=0, r2=undefined）。
-      promptCount = 0;
-      const r2 = await fireToolCall(pi, ctx, {
-        toolName: "bash",
-        toolCallId: "tc-grant-2",
-        input: { command },
-      });
-      assert.equal(promptCount, 0, "second call should NOT prompt (persistent grant hit)");
-      assert.equal(r2, undefined, "second call should auto-allow (grant memory hit)");
-
-      // Cleanup
-      await rm(linkPath, { force: true });
+        // 第二次：同命令。V3 bug → 重弹（promptCount=1）。
+        // Fix → grant 命中 → auto_allow（promptCount=0, r2=undefined）。
+        promptCount = 0;
+        const r2 = await fireToolCall(pi, ctx, {
+          toolName: "bash",
+          toolCallId: "tc-grant-2",
+          input: { command },
+        });
+        assert.equal(promptCount, 0, "second call should NOT prompt (persistent grant hit)");
+        assert.equal(r2, undefined, "second call should auto-allow (grant memory hit)");
+      } finally {
+        // Cleanup：outerDir 在 sandbox 之外，rm(root) 不会回收它。
+        await rm(linkPath, { force: true, recursive: true }).catch(() => {});
+        await rm(outerDir, { force: true, recursive: true }).catch(() => {});
+      }
     },
   );
 });
