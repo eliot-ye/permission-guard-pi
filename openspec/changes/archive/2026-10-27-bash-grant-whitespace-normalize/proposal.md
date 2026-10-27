@@ -74,4 +74,30 @@ We explored building a full AST-based equivalence (e3). **Rejected**:
 - **Subsystem**: policy-core (grant memory) + side-effects (audit).
 - **Tier**: medium (grant key semantics is a policy-core concern; audit consistency is side-effects).
 - **Impact scope**: behavior refinement, no schema change, graceful migration.
-- **Actual impact vs expected**: The change removes a real inconsistency (grant vs rule equivalence). No new security surface — grammar-level equivalence explicitly excluded. This is a **de-escalation** of complexity (rejected AST), aligning with "最小安全等价".
+
+## 系统工程影响评估
+
+- **预期行为模型**（可验证契约）：
+  1. **whitespace 等价命中**：`git status` 授权后 `git  status`（双空格）命中同一 grant——GM21（持久）+ GM22（会话）断言
+  2. **参数不同不命中**：`git status` 授权后 `git status --short` 不命中（参数不同 → 不同命令）——GM21 断言
+  3. **语义漂移不判等价**：`bash -c "git status"`、`cd /tmp && git status` 不命中（MUST NOT 判等价）——GM21 断言
+  4. **audit/grant 键派生一致**：audit 截断记录的 `commandHash` 与 grant 侧 `commandHash` 用同一 `bashCommandHash`——AL9 断言
+
+- **与既有架构/风格的遵循关系**：全部遵循既有约定——`path-utils.ts` 纯函数（无 IO/UI），已是 config/decision/trust 的基础模块；单一事实源（trust 与 audit 共用同一派生）避免 B5 契约漂移；等价语义与 rule 通道（config.ts normalizeWhitespace）对齐。**无偏离点**。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。对照 proposal 的"系统工程影响评估"节。本复盘为 audit a1 后补写——原归档时缺此节，2026-10-27 system-audit project 发现后闭合。)
+
+- **实际影响的分系统**：`policy-core`（trust.ts hashCommand 改用共享派生）+ `side-effects`（audit.ts truncateCommand 同步）——与预期一致
+- **实际整体性能变化**：零性能影响——与预期一致（`normalizeBashCommand` 为常数级 `replace`；哈希成本不变）
+- **实际是局部优化还是全局协调**：局部优化（grant 键等价语义对齐 rule 通道）——与预期一致
+- **局部优化的实际全局影响**：消除 grant/rule 两套等价语义的不一致；语法级等价显式排除（语义漂移不判等价）——无新安全面，**全局协调更优**（弃 AST 是 de-escalation）——与预期一致
+- **模型验证**：
+  1. **whitespace 等价命中** ✅ 已验证——GM21（`git  status` 匹配 `git status` 持久 grant）+ GM22（`echo  hi` 匹配 `echo hi` 会话 grant）
+  2. **参数不同不命中** ✅ 已验证——GM21（`git status --short` 不命中）
+  3. **语义漂移不判等价** ✅ 已验证——GM21 边界断言（`bash -c`/`cd` 不判等价）；文档注释（path-utils.ts）与 Non-Goal 对齐
+  4. **audit/grant 键派生一致** ✅ 已验证——AL9（截断记录 `commandHash` 与 grant 侧派生一致）
+  - **预期行为模型已验证**（4/4）
+
+- **预期之外的副作用**：无。AL7（并发 audit 序列化）全量跑偶发 700/1——已确认 HEAD 基线既有已知竞态（`al4_af7_flaky_tests_existing`），非本 change 引入；重跑 701/0 全绿。

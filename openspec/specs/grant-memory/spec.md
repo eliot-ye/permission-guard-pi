@@ -186,21 +186,6 @@
   - audit 日志含 `event: "allow_persistent", grant_type: "bash"` 和 `saved_to: <trusted.json 绝对路径>`
   - 下次任意 session 访问相同 `rawCommand` 均 auto-allow
 
-#### Scenario: whitespace 等价命中同一 grant（P1 e2）
-
-- **WHEN** 用户已授权 `git status`（持久），随后命令为 `git  status`（双空格）
-- **THEN** 命中同一 grant（hash 输入已做词法 whitespace 规范化），auto-allow 不再弹窗
-
-#### Scenario: 参数不同不命中（P1 e2 边界）
-
-- **WHEN** 用户已授权 `git status`（持久），随后命令为 `git status --short`
-- **THEN** 不命中（参数不同 → 不同命令），走 tier=three 弹窗
-
-#### Scenario: 语法级语义漂移不做等价（P1 e2 边界）
-
-- **WHEN** 用户已授权 `git status`（持久），随后命令为 `bash -c "git status"` 或 `cd /tmp && git status`
-- **THEN** 不命中（shell-forwarder / cwd 漂移属语义漂移，MUST NOT 判等价），走 tier=three 弹窗
-
 #### Scenario: 其他类型 bash 命令（控制流 + shell 转发器）授权为 read_write
 
 - **WHEN** bash 命令为 `bash -c "rm -rf /etc/passwd"`（`reason: "shell_forwarder"`）、`find /etc | xargs rm`（`reason: "forwarding_command"`）、`while read x; do cat $x; done`（`reason: "control_flow"`）、或 `cd /etc && rm -rf .`（`reason: "cd_chdir"`）
