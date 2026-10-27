@@ -351,6 +351,41 @@ test("GM20: missing_trusted_json_treats_bash_grants_as_empty", async () => {
   });
 });
 
+test("GM21: bash_grant_whitespace_normalized_equivalent", async () => {
+  // P1 (bash raw-command grant 等价语义, e2): grant key is normalized
+  // whitespace (replace(/\s+/g," ").trim()), so `git  status` (double space)
+  // matches a grant issued for `git status`. This aligns with rule matching
+  // (config.ts normalizeWhitespace) — same system, one equivalence semantic.
+  await withTmpStore(async (store, path) => {
+    const cmd = "git status";
+    await store.addBashPersistentGrant({
+      projectHash: "h1",
+      rawCommand: cmd,
+      reason: "glob_expansion",
+      permission: "read_only",
+    });
+    // Whitespace-variant command must hit the same grant.
+    assert.equal(store.hasBashPersistentGrant("h1", "git  status"), true, "double space matches");
+    assert.equal(store.hasBashPersistentGrant("h1", "git    status"), true, "multiple spaces match");
+    assert.equal(store.hasBashPersistentGrant("h1", "  git status  "), true, "leading/trailing space matches");
+    // Different command must NOT match.
+    assert.equal(store.hasBashPersistentGrant("h1", "git status --short"), false, "extra arg does not match");
+    // The stored rawCommand stays exact (grant preserves the original string).
+    const raw = await readFile(path, "utf8");
+    const parsed = JSON.parse(raw);
+    assert.equal(parsed.bashGrants[0].rawCommand, cmd, "rawCommand preserved exact");
+  });
+});
+
+test("GM22: bash_grant_whitespace_normalized_session", async () => {
+  // Session grants follow the same normalized-key semantic.
+  await withTmpStore(async (store) => {
+    store.addBashSessionGrant("h1", "echo hi", "shell_forwarder", "read_only");
+    assert.equal(store.hasBashSessionGrant("h1", "echo  hi"), true, "session grant whitespace match");
+    assert.equal(store.hasBashSessionGrant("h1", "echo hi there"), false, "different args no match");
+  });
+});
+
 // -------- GMP1-GMP3: file/dir permission hardening (Change A) --------
 
 test("GMP1: trust_store_writes_trusted_json_with_0600_permissions", async () => {

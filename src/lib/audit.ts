@@ -21,7 +21,7 @@
 
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
-import { createHash } from "node:crypto";
+import { bashCommandHash } from "./path-utils.ts";
 import type { Authorization, GrantSource } from "./decision.ts";
 
 export type AuditEvent =
@@ -121,9 +121,10 @@ function truncateCommand(record: AuditRecord): AuditRecord {
     : TRUNCATION_NOTE;
   // B5: preserve a stable reference to the original command. The truncation
   // loses the tail, so an auditor can no longer re-derive the grant key from
-  // the stored command alone — stamp sha256(original) so the record can be
-  // matched against trusted.json's bashGrants[].commandHash.
-  const commandHash = createHash("sha256").update(cmd).digest("hex");
+  // the stored command alone — stamp sha256(normalized) so the record can be
+  // matched against trusted.json's bashGrants[].commandHash. Uses the SAME
+  // key derivation as trust.ts (bashCommandHash) so audit ↔ grant match.
+  const commandHash = bashCommandHash(cmd);
   return { ...record, command: truncated, note, commandHash };
 }
 

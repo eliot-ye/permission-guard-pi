@@ -26,6 +26,7 @@
 1. **不做完整 shell 解析**
    - bash 命令通过正则和启发式提取文件目标（`bash-extract.ts`），不实现完整 shell grammar 解析器。`$(...)`、反引号、子 shell、heredoc 等复杂语法直接标记为"不可靠"（`bash-extract.ts:9-24`），不做语义展开。
    - 验证：`grep -n "command_substitution\|heredoc\|control_flow" src/lib/bash-extract.ts` 返回"不可靠"标记定义。
+   - **P1 e2 等价语义边界**：bash grant 键只做**词法 whitespace 规范化**（`normalizeBashCommand`，`git  status` === `git status`），**不做语法级等价**——`bash -c "git status"`、`cd /tmp && git status` 等语义漂移不判等价（误判会误放行）。验证：`grep -n "normalizeBashCommand" src/lib/path-utils.ts` 存在；`grep -n "grammar-level" src/lib/path-utils.ts` 返回边界注释。
 
 2. **不做解释器代码静态分析**
    - 对 `python -c "open('/etc/passwd').read()"`、`node -e "fs.readFile(...)"` 等解释器内联代码，系统无法穿透解释器语义提取文件目标——bash extractor 仅扫描 bash 层面的路径 token，不分析解释器内部的代码语义。

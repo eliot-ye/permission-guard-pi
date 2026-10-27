@@ -14,7 +14,7 @@
 
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
-import { createHash } from "node:crypto";
+import { bashCommandHash } from "./path-utils.ts";
 
 /**
  * Best-effort chmod. Skips when:
@@ -147,8 +147,11 @@ function bashKey(projectHash: string, rawCommand: string): string {
   return `${projectHash}|${hashCommand(rawCommand)}`;
 }
 
+// P1 (e2): grant key uses the shared whitespace-normalized hash so the grant
+// channel and the audit channel agree. `git  status` === `git status` (lexical
+// whitespace only). See path-utils.ts normalizeBashCommand for the boundary.
 function hashCommand(rawCommand: string): string {
-  return createHash("sha256").update(rawCommand).digest("hex");
+  return bashCommandHash(rawCommand);
 }
 
 export async function createTrustStore(trustedFilePath: string): Promise<TrustStore> {

@@ -204,3 +204,31 @@ export function prettyPath(p: string): string {
   }
   return normalized;
 }
+
+// -------- Bash command equivalence (P1, e2) --------
+//
+// Single source of truth for bash-command grant keys. Both the grant channel
+// (trust.ts bashKey) and the audit channel (audit.ts truncateCommand commandHash)
+// MUST use the same key derivation, or an auditor can't match a truncated audit
+// record to the grant that authorized it (B5 contract).
+//
+// Equivalence semantic (settled in P1 design): whitespace normalization only.
+//   - `git  status` (double space) === `git status`
+//   - `  git status  ` (padding) === `git status`
+//   - `git status` !== `git status --short` (args differ → different command)
+//
+// Explicit boundary (aligns with security-boundary-docs Non-Goal "不做完整
+// shell 解析"): NO grammar-level equivalence. We do NOT treat
+//   `bash -c "git status"` === `git status` (shell-forwarder semantic drift)
+//   `cd /tmp && git status` === `git status` (cwd drift)
+// as equivalent — those are semantic drifts that would wrongly auto-allow. Only
+// lexical whitespace collapsing is safe.
+
+export function normalizeBashCommand(rawCommand: string): string {
+  return rawCommand.replace(/\s+/g, " ").trim();
+}
+
+// sha256 of the NORMALIZED command. Stable identity for the grant key.
+export function bashCommandHash(rawCommand: string): string {
+  return createHash("sha256").update(normalizeBashCommand(rawCommand)).digest("hex");
+}

@@ -128,7 +128,7 @@
 
 **键结构**：`<projectHash> | command_hash | session_tag>`
 
-- `command_hash` 为 `rawCommand` 的 SHA-256（16 进制小写，无分隔符），以将长命令摘要化
+- `command_hash` 为 `rawCommand` 的 SHA-256（16 进制小写，无分隔符），以将长命令摘要化。**P1 等价语义（e2）**：哈希输入先做**词法 whitespace 规范化**（`replace(/\s+/g," ").trim()`），因此 `git  status`（双空格）与 `git status` 命中同一 grant；与 tool+pattern 规则匹配（config.ts normalizeWhitespace）对齐——同一系统、同一等价语义。
 - `session_tag` 为与核心 grant 一样的 `sessionId`（或当前进程标识），以支持跨会话持久化
 - `permission` 采用 `read_write` / `read_only`（不区分 `read`/`write`/`delete`，由 `extractBashTargets` 提供的 `ExtractResult.reason` 决定授权类型；具体规则见下文）
 - `createdAt` 为 ISO-8601 时间戳
@@ -144,6 +144,12 @@
 3. **allow 规则命中的命令不写入记忆**：当 bash 命令被 allow 规则匹配并 auto-allow 时，不写入 Bash 命令记忆（无需记忆，规则已持久授权）
 
 4. **deny 规则命中的命令不写入记忆**：当 bash 命令被 deny 规则匹配并 deny_hard 时，不写入 Bash 命令记忆（永远不可放行）
+
+**P1 等价语义边界**（与 security-boundary-docs Non-Goal「不做完整 shell 解析」对齐）：
+
+- 等价止步于**词法 whitespace 规范化**——`git  status` === `git status`；`  git status  ` === `git status`
+- **不做语法级等价**：`bash -c "git status"` ≠ `git status`（shell-forwarder 语义漂移）；`cd /tmp && git status` ≠ `git status`（cwd 漂移）——这些语义漂移若被判等价会**误放行**，MUST NOT 采纳
+- `git status` ≠ `git status --short`（参数不同 → 不同命令）
 
 **查询逻辑**：
 
@@ -179,6 +185,21 @@
   - 会话级 memory 也写入（跨会话生效入口）
   - audit 日志含 `event: "allow_persistent", grant_type: "bash"` 和 `saved_to: <trusted.json 绝对路径>`
   - 下次任意 session 访问相同 `rawCommand` 均 auto-allow
+
+#### Scenario: whitespace 等价命中同一 grant（P1 e2）
+
+- **WHEN** 用户已授权 `git status`（持久），随后命令为 `git  status`（双空格）
+- **THEN** 命中同一 grant（hash 输入已做词法 whitespace 规范化），auto-allow 不再弹窗
+
+#### Scenario: 参数不同不命中（P1 e2 边界）
+
+- **WHEN** 用户已授权 `git status`（持久），随后命令为 `git status --short`
+- **THEN** 不命中（参数不同 → 不同命令），走 tier=three 弹窗
+
+#### Scenario: 语法级语义漂移不做等价（P1 e2 边界）
+
+- **WHEN** 用户已授权 `git status`（持久），随后命令为 `bash -c "git status"` 或 `cd /tmp && git status`
+- **THEN** 不命中（shell-forwarder / cwd 漂移属语义漂移，MUST NOT 判等价），走 tier=three 弹窗
 
 #### Scenario: 其他类型 bash 命令（控制流 + shell 转发器）授权为 read_write
 
@@ -341,3 +362,35 @@ soft sensitive 路径（见 `access-decision` spec 的"可赦免敏感路径分�
 
 - **WHEN** 用户对项目外 `~/.config/app/config.json` 选"总是允许"
 - **THEN** 持久化 grant 仅对 `config.json` 生效，`~/.config/app/settings.json` 的读取仍需重新授权（按文件粒度，与既有 sensitive 按文件记忆一致）
+
+### Requirement: Bash grant 词法 whitespace 等价
+
+**Level: should**
+
+系统的 bash 命令 grant 键派生（`command_hash`）SHALL 先做**词法 whitespace 规范化**（`replace(/\s+/g," ").trim()`）再 SHA-256，使 `git  status`（双空格）与 `git status` 命中同一 grant。
+
+- **WHEN** 用户已授权 `git status`（持久），随后命令为 `git  status`（双空格）
+- **THEN** 命中同一 grant，auto-allow 不再弹窗
+
+#### Scenario: 词法 whitespace 等价命中同一 grant
+
+- **GIVEN** 用户已授权 `git status`（持久）
+- **WHEN** 随后命令为 `git  status`（双空格）
+- **THEN** 命中同一 grant（hash 输入已做词法 whitespace 规范化），auto-allow 不再弹窗
+
+#### Scenario: 参数不同不命中
+
+- **GIVEN** 用户已授权 `git status`（持久）
+- **WHEN** 随后命令为 `git status --short`
+- **THEN** 不命中（参数不同 → 不同命令），走 tier=three 弹窗
+
+#### Scenario: 语法级语义漂移不做等价
+
+- **GIVEN** 用户已授权 `git status`（持久）
+- **WHEN** 随后命令为 `bash -c "git status"` 或 `cd /tmp && git status`
+- **THEN** 不命中（shell-forwarder / cwd 漂移属语义漂移，MUST NOT 判等价），走 tier=three 弹窗
+
+#### Scenario: audit 与 grant 键派生一致
+
+- **WHEN** bash 命令 > 511 字符被截断
+- **THEN** audit 记录含 `commandHash = bashCommandHash(原始命令)`，与 `trusted.json` 的 `bashGrants[].commandHash` 派生一致
