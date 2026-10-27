@@ -16,7 +16,7 @@
 
 import type { MergedPolicy, MatchedEntry, Permission } from "./config.ts";
 import type { SensitiveRule } from "./sensitive.ts";
-import { isDevSocketOrFd } from "./bash-extract.ts";
+import { isDevSocketOrFd } from "./bash-extract/index.ts";
 
 export type Action = "read" | "write" | "delete";
 export type Region = "project_inner" | "project_outer";

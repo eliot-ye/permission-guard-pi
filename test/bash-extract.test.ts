@@ -26,14 +26,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractBashTargets } from "../src/lib/bash-extract.ts";
+import { extractBashTargets } from "../src/lib/bash-extract/index.ts";
 import {
   FIND_WRITE_FLAGS,
   isFindReadOnly,
   isReadOnlyWithArgs,
   isDevSocketOrFd,
   isForwarderStageSafe,
-} from "../src/lib/bash-extract.ts";
+} from "../src/lib/bash-extract/index.ts";
 
 // -------- BT1: rm -rf extraction --------
 
@@ -1043,7 +1043,7 @@ test("BMG47: find_in_stage_with_bounded_glob_allow", () => {
 
 // -------- isBoundedGlobSafe unit tests --------
 
-import { isBoundedGlobSafe } from "../src/lib/bash-extract.ts";
+import { isBoundedGlobSafe } from "../src/lib/bash-extract/index.ts";
 
 test("BMG48: isBoundedGlobSafe_true_for_bounded_read_only_glob", () => {
   const proj = "/proj";
@@ -1844,7 +1844,7 @@ import {
   isAnyUnreliableCommand,
   tokenizeBashCommand,
   looksLikePathToken,
-} from "../src/lib/bash-extract.ts";
+} from "../src/lib/bash-extract/index.ts";
 
 // -------- isSilentCommand --------
 

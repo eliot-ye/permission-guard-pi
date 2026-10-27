@@ -40,7 +40,7 @@ import {
 import { findSensitiveMatch } from "../src/lib/sensitive.ts";
 import { createTrustStore, type TrustStore } from "../src/lib/trust.ts";
 import { createAuditLogger, type AuditLogger } from "../src/lib/audit.ts";
-import { extractBashTargets, tokenizeBashCommand, looksLikePathToken, type ExtractResult } from "../src/lib/bash-extract.ts";
+import { extractBashTargets, tokenizeBashCommand, looksLikePathToken, type ExtractResult } from "../src/lib/bash-extract/index.ts";
 import { decide, type Decision } from "../src/lib/decision.ts";
 import { t } from "../src/lib/i18n.ts";
 import type { Lang, BashReasonCode, ReasonCode, UiCode } from "../src/lib/reason-codes.ts";

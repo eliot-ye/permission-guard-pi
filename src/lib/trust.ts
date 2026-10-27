@@ -113,7 +113,7 @@ export interface TrustStore {
   // Bash-command session-level (in-memory).
   hasBashSessionGrant: (projectHash: string, rawCommand: string) => boolean;
   addBashSessionGrant: (projectHash: string, rawCommand: string, reason: string, permission: Permission) => void;
-  clearBashGrants: () => void;
+
 
   // Bash-command persistent (disk-backed, async).
   hasBashPersistentGrant: (projectHash: string, rawCommand: string) => boolean;
@@ -210,6 +210,10 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
       sessionGrants.add(grantKey(projectHash, action, path));
     },
 
+    // Test seam — production clears via initSession → new TrustStore (see SYS6
+    // integration test, test/sys-integration.test.ts:359). Kept for unit tests
+    // GM2 (path-based, test/trust.test.ts:38) and GM14 (bash-command-based,
+    // test/trust.test.ts:258). Do not delete: production path is covered by SYS6.
     clearSessionGrants: () => {
       sessionGrants.clear();
       bashSessionGrants.clear();
@@ -252,9 +256,7 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
       bashSessionGrants.add(bashKey(projectHash, rawCommand));
     },
 
-    clearBashGrants: () => {
-      bashSessionGrants.clear();
-    },
+
 
     hasBashPersistentGrant: (projectHash, rawCommand) => {
       const key = bashKey(projectHash, rawCommand);
