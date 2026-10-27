@@ -134,7 +134,7 @@
 
 **验证**：所有 20 条新增测试在 tasks.md 的 T4 / T5 / T6 三处实现，最终由 `npm test` 全绿断言（`pass N+20 / fail 0`，N 是变更前的 448，删除 1 条占位后基线为 447，新增 20 条后总计 467）。
 
-## 实际 vs 预期复盘（tier-medium，5 字段）
+## 实际系统工程影响 vs 预期
 
 （服务于 `system-engineering` 主基调第 3 条"从定性到定量的综合集成"——综合集成循环的闭合动作。对照源 1：本节"系统工程影响评估"；对照源 2：`openspec/specs/{approval-flow,grant-memory,audit-log,grant-memory}/spec.md` baseline。）
 

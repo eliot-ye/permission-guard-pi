@@ -159,3 +159,19 @@
 **scenario→test 覆盖账本状态**：全绿。BT-BLOB-1..25（25 条）+ BT-RUN-1..9（9 条）= 34 条断言全部通过；proposal 覆盖账本表 27 行全部对齐实现，T9.1 补充的 BT-BLOB-19..25（7 条 P1 分歧面回归）已同步进 code review 触发的 spec delta 修正。
 
 **baseline 对照**：`openspec/specs/bash-target-extraction/spec.md` 存在（前序 archive 已 sync）。本次 change delta 触碰的 requirement 是"静默命令白名单"，本次新增的 ADDED Requirements 两条（git blob 语法 / npm run 形式）与 baseline 中原有静默白名单契约不冲突——原有契约的"git 网络操作 / 写操作 subcommand 判不可靠"部分由 BT-BLOB-11..16 与新增 BT-BLOB-19..23 共同回归断言保护，未被破坏。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。本复盘为 2026-10-27 system-audit project（18:37）a1 延伸后补写——早期归档时缺此节。）
+
+- **实际影响的分系统**：`bash-target-extraction`（git blob 语法 + npm/yarn/pnpm run 白名单扩展）——与预期一致
+- **实际整体性能变化**：无性能层面变化（静态分类纯字符串处理）；用户体验——repo 内只读查询从弹窗降为静默——与预期一致
+- **实际是局部优化还是全局协调**：局部优化（单分系统语义扩展）——与预期一致
+- **局部优化的实际全局影响**：误报率从约 15% 降至约 5%（Change B 覆盖 14 条真实误报中的 ~12 条）——与预期一致
+- **模型验证**：
+  1. **git blob 语法放行** ✅ 已验证——BT-BLOB-1 到 BT-BLOB-14（git blame/diff/show/log/status/rev-parse repo 内只读查询静默）
+  2. **npm/yarn/pnpm run 白名单** ✅ 已验证——BT-RUN-1 到 BT-RUN-4（test/lint/audit 静默）
+  3. **应保持不可靠回归** ✅ 已验证——BT-BLOB-15 到 BT-BLOB-20 + BT-RUN-5 到 BT-RUN-8（git network/写操作 subcommand、越界路径、非白名单脚本仍判 UNRL）
+  - **预期行为模型已验证**（3/3）
+
+- **预期之外的副作用**：无。剩余 2 条误报属 Change C 范畴（后续 change）。

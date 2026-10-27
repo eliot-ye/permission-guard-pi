@@ -207,3 +207,21 @@
 **总计**：4 条新增测试，覆盖 C5 主路径 + 回归 + 边界。
 
 **回归面**：既有 `test/backlog-regression.test.ts`（SYS9/SYS10/SYS11）与 `extensions/index.test.ts` 的 bash grant 相关测试（BGM-*）必须零回归。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。本复盘为 2026-10-27 system-audit project（18:37）a1 延伸后补写——早期归档时缺此节。）
+
+- **实际影响的分系统**：`bash-target-extraction`（C1-C4：SILENT 收窄 + UNRELIABLE_COMMANDS + shell 转发器扩展 + `<` 重定向）+ `grant-memory`（C5：grant-unread 优先级）——与预期一致
+- **实际整体性能变化**：安全水位定向收窄——与预期一致（5 类高危命令形态改为显式弹窗；合法用例零回归）
+- **实际是局部优化还是全局协调**：全局协调（同时改 bash-target-extraction + grant-memory 契约）——与预期一致
+- **局部优化的实际全局影响**：高危命令不再静默通过；grant 不覆盖 unread（配置契约优先）——与预期一致
+- **模型验证**：
+  1. **SILENT 收窄** ✅ 已验证——`npm run build` / `git log /etc/passwd` / `sed -i` / `python3 -c` / `scp` → tier=two 弹窗（30 条 bash-extract 测试）
+  2. **shell 转发器扩展** ✅ 已验证——`bash /tmp/evil.sh` / `source /tmp/x.sh` → tier=two 弹窗
+  3. **`<` 输入重定向** ✅ 已验证——`bash < /tmp/evil.sh` / `diff < a < b` → read target 提取
+  4. **grant-unread 优先级** ✅ 已验证——SYS-B1/B2（grant 不覆盖 unread）+ SYS-B3（无 unread 时 grant 生效）+ SYS-B4（多 target 边界）
+  5. **合法用例回归** ✅ 已验证——`git status` / `npm test` / `git log --oneline` / `/dev/null` / `find -name` 无弹窗
+  - **预期行为模型已验证**（5/5）
+
+- **预期之外的副作用**：无。C5 触发 human-in-loop 场景 1（grant-memory 公共契约变更）与 SILENT 结构变更——均在 explore 阶段用户拍板（Q2/Q4）。

@@ -117,3 +117,21 @@ pi-coding-agent 在日常开发中经常执行 read-only for 循环遍历文件�
 
 - **I3 契约漂移**（双引号内反引号位置判定）：结果保守，不阻塞当前 change；供后续 `bash-target-extraction` 相关 change 参考，若未来需要扩展反引号豁免（当前明确 Non-Goals），必须同步统一两个解析器的位置判定。
 - **白名单外的命令替换形式覆盖度**：本 change 白名单 6 个命令（basename/dirname/echo/printf/pwd/test），audit log 显示 90%+ 常见场景已覆盖。若后续观察到高频白名单外命令（如 `realpath -m`、`[ -n x ]`）的频繁弹窗，应作为新 change 的 proposal 输入，评估纳入白名单的收益与风险。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。本复盘为 2026-10-27 system-audit project（18:37）a1 延伸后补写——早期归档时缺此节。）
+
+- **实际影响的分系统**：`bash-target-extraction`（scanUnreliable 增加命令替换豁免分支）——与预期一致
+- **实际整体性能变化**：无性能实质变化（豁免判定 O(1) hash 查找，仅 `$(` 出现时触发）——与预期一致
+- **实际是局部优化还是全局协调**：局部优化（单点函数增加豁免分支）——与预期一致
+- **局部优化的实际全局影响**：read-only for 循环 + basename/dirname 组合不再被弹窗打断；白名单外仍判 unreliable——与预期一致
+- **模型验证**：
+  1. **豁免场景** ✅ 已验证——`for f in x; do echo "=== $(basename $f) ==="; done` → reliable: true
+  2. **非豁免（白名单外）** ✅ 已验证——`echo "$(cat /etc/passwd)"` → reliable: false, command_substitution
+  3. **嵌套** ✅ 已验证——嵌套 `$()` 深度限定
+  4. **用户变量** ✅ 已验证——`findUnresolvedVariable` 仍判 undefined variable
+  5. **审计回归** ✅ 已验证——audit-97（`$(grep -c 'X' file.md)`）仍判 unreliable
+  - **预期行为模型已验证**（5/5）
+
+- **预期之外的副作用**：无。I3 契约漂移（双引号内反引号位置判定）为已知保守结果，不阻塞本 change（供后续参考）。

@@ -182,3 +182,22 @@ Change B（`bash-extractor-false-positive-trim`）落地后，权限扩展的误
 - 主 spec baseline 缺"空 allow-set 命令 strict 模式"requirement（Change B 已记录，未修）——Change C 扩展 tsc/npx 两个空 allow-set 命令的特例，但 baseline 里没有"tsc/npx 严格 flag-only"的 requirement 作为"改之前"的对照锚点。建议后续独立 change 补齐主 spec 的 baseline 完整性。
 - `npx --no-install <pkg>` 的"任意包名静默"依赖用户信任项目本地已装包——若用户装了恶意包，静态分析层无法验证。这是 design.md 已记录的取舍偏宽。
 - 未开启项目级 tsc 类型 gate（Change B P0 类型错误的根因）——Change C 未新增类型错误，但既有 3 条 pre-existing 错误仍在。建议 `/td-system-audit` 时评估。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。本复盘为 2026-10-27 system-audit project（18:37）a1 延伸后补写——早期归档时缺此节。）
+
+- **实际影响的分系统**：`bash-target-extraction`（tsc --noEmit / go vet/fmt / npx --no-install 静默扩展）——与预期一致
+- **实际整体性能变化**：无性能层面变化（静态分类纯字符串处理）；用户体验——`tsc --noEmit` / `go vet ./...` / `npx --no-install eslint` 降为静默——与预期一致
+- **实际是局部优化还是全局协调**：局部优化（单分系统语义扩展，较 Change B 更严格）——与预期一致
+- **局部优化的实际全局影响**：误报率从约 5% 降至约 3%（Change C 覆盖剩余 5% 里的约 40%）——与预期一致
+- **模型验证**：
+  1. **tsc --noEmit/--version/--help 静默** ✅ 已验证——BT-C1-1 到 BT-C1-3
+  2. **tsc 无 --noEmit 或带 --outDir/--emitDeclarationOnly 仍判 UNRL** ✅ 已验证——BT-C1-4 到 BT-C1-6
+  3. **go vet/fmt repo 内路径静默** ✅ 已验证——BT-C2-1 到 BT-C2-3
+  4. **go vet/fmt 越界/绝对路径 + go build/test/run/mod tidy 仍判 UNRL** ✅ 已验证——BT-C2-4 到 BT-C2-9
+  5. **npx --no-install 静默** ✅ 已验证——BT-C3-1 到 BT-C3-2
+  6. **npx 无 --no-install / 带额外 positional 仍判 UNRL** ✅ 已验证——BT-C3-3 到 BT-C3-4
+  - **预期行为模型已验证**（6/6）
+
+- **预期之外的副作用**：无。Change C 未新增类型错误（既有 3 条 pre-existing 仍在，非本 change 引入）。
