@@ -297,3 +297,38 @@ test("SENS-A2: authorized_keys in a non-.ssh dir is NOT sensitive", () => {
     "authorized_keys outside .ssh/ must NOT be flagged sensitive",
   );
 });
+
+// ============ ui-i18n T4: SensitiveRule.code assertions ============
+
+
+test("SENS-CODE-1: every rule declares a code field", () => {
+  for (const rule of DEFAULT_SENSITIVE_RULES) {
+    assert.ok(rule.code, `rule "${rule.reason}" must declare a code field`);
+  }
+});
+
+test("SENS-CODE-2: 5 hard rules have hard codes", () => {
+  const hardRules = DEFAULT_SENSITIVE_RULES.filter((r) => r.level === "hard");
+  assert.equal(hardRules.length, 5);
+  const expectedHard = [
+    "ssh_private_key",
+    "private_key_cert",
+    "env_credential_store",
+    "credential_config",
+    "system_credential_config",
+  ];
+  for (const code of expectedHard) {
+    const rule = hardRules.find((r) => r.code === code);
+    assert.ok(rule, `hard rule with code "${code}" must exist`);
+  }
+});
+
+test("SENS-CODE-3: 2 soft rules have soft codes", () => {
+  const softRules = DEFAULT_SENSITIVE_RULES.filter((r) => r.level === "soft");
+  assert.equal(softRules.length, 2);
+  const expectedSoft = ["ssh_public_key", "soft_credential_config"];
+  for (const code of expectedSoft) {
+    const rule = softRules.find((r) => r.code === code);
+    assert.ok(rule, `soft rule with code "${code}" must exist`);
+  }
+});

@@ -19,6 +19,18 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 import { registerPermissionGate } from "../extensions/index.ts";
+import { t } from "../src/lib/i18n.ts";
+import { detectLang } from "../src/lib/lang-detect.ts";
+
+// i18n-aware UI choice strings (see extensions/index.test.ts for rationale).
+// Uses detectLang() so tests work regardless of dev env LANG.
+const UI = {
+  allowOnce: t("choice_allow_once", detectLang(process.env, {})),
+  allowSession: t("choice_allow_session", detectLang(process.env, {})),
+  alwaysAllow: t("choice_always_allow", detectLang(process.env, {})),
+  alwaysAllowCmd: t("choice_always_allow_command", detectLang(process.env, {}), { path: "trusted.json" }),
+  deny: t("choice_deny", detectLang(process.env, {})),
+};
 
 // -------- Mock pi (minimal for integration tests) --------
 
@@ -36,7 +48,7 @@ function createMockPi(opts: {
 } {
   const notifications: Array<{ message: string; level: string }> = [];
   const uiChoice =
-    opts.uiChoice ?? (async (_p, choices: string[]) => choices[0] || "Allow this call only");
+    opts.uiChoice ?? (async (_p, choices: string[]) => choices[0] || UI.allowOnce);
 
   const ctx = {
     hasUI: opts.hasUI ?? true,
@@ -124,7 +136,7 @@ test("SYS1: cross-source conflict (unread vs read_write) triggers three-tier pro
         projectRoot,
         uiChoice: async (prompt) => {
           promptPrompt = prompt;
-          return "Deny";
+          return UI.deny;
         },
       });
 
@@ -179,7 +191,7 @@ test("SYS2: allow_persistent writes grant + subsequent session auto-allows", asy
       // Session 1: grant persistent
       const s1 = createMockPi({
         projectRoot,
-        uiChoice: async () => "Always allow (save to trusted.json)",
+        uiChoice: async () => UI.alwaysAllow,
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
       await fireToolCall(s1.pi, s1.ctx, {
@@ -230,7 +242,7 @@ test("SYS3: unread blocks even if there was a previous allow_session grant", asy
     async ({ projectRoot, trustedDir }) => {
       const { pi, ctx, notifications } = createMockPi({
         projectRoot,
-        uiChoice: async () => "Deny",
+        uiChoice: async () => UI.deny,
       });
       registerPermissionGate(pi, {
         trustedDir,
@@ -249,7 +261,7 @@ test("SYS3: unread blocks even if there was a previous allow_session grant", asy
 
       assert.equal(result?.block, true);
       assert.ok(
-        notifications.some((n) => n.level === "warning" && n.message.includes("Blocked")),
+        notifications.some((n) => n.level === "warning" && (n.message.includes("Blocked") || n.message.includes("已阻断"))),
         `should notify warning: ${JSON.stringify(notifications)}`,
       );
     },
@@ -271,7 +283,7 @@ test("SYS4: bash command with command substitution triggers tier-two prompt + au
         projectRoot,
         uiChoice: async (prompt) => {
           promptPrompt = prompt;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(pi, {
@@ -314,7 +326,7 @@ test("SYS5: bash rm command routes to outer-path prompt", async () => {
         projectRoot,
         uiChoice: async (prompt) => {
           promptPrompt = prompt;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(pi, {
@@ -356,7 +368,7 @@ test("SYS6: session grant survives within session, cleared on next pi.on registr
         projectRoot,
         uiChoice: async () => {
           promptCount++;
-          return "Allow for this session";
+          return UI.allowSession;
         },
       });
       registerPermissionGate(s1.pi, {
@@ -368,7 +380,7 @@ test("SYS6: session grant survives within session, cleared on next pi.on registr
         },
       });
 
-      // First call: prompts, user chooses "Allow for this session"
+      // First call: prompts, user chooses UI.allowSession
       await fireToolCall(s1.pi, s1.ctx, {
         toolName: "write",
         toolCallId: "tc-6a",
@@ -389,7 +401,7 @@ test("SYS6: session grant survives within session, cleared on next pi.on registr
         projectRoot,
         uiChoice: async () => {
           promptCount++;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(s2.pi, {
@@ -491,7 +503,7 @@ test("SYS7: bash target using symlink inside project to outer sensitive is promp
         projectRoot,
         uiChoice: async (prompt) => {
           promptPrompt = prompt;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(pi, {
@@ -541,7 +553,7 @@ test("SYS-PATH: write to non-existent relative path inside project is auto-allow
       let promptShown = false;
       const uiChoice = async () => {
         promptShown = true;
-        return "Deny";
+        return UI.deny;
       };
       const { pi, ctx } = createMockPi({ projectRoot, uiChoice });
 
@@ -606,7 +618,7 @@ test("SYS-GRANT: bash symlink target persistent grant reused on second call", as
           projectRoot,
           uiChoice: async () => {
             promptCount++;
-            return "Always allow (save to trusted.json)";
+            return UI.alwaysAllow;
           },
         });
         registerPermissionGate(pi, {
@@ -677,7 +689,7 @@ test("SYS-SOFT: soft outer config.yml read prompts tier three and persists", asy
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Always allow (save to trusted.json)";
+          return UI.alwaysAllow;
         },
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
@@ -688,7 +700,7 @@ test("SYS-SOFT: soft outer config.yml read prompts tier three and persists", asy
       });
       assert.equal(r1, undefined, "first read allowed");
       assert.ok(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         `soft outer read must offer "Always allow" (tier=three), got: ${choices}`,
       );
       // Let async trusted.json writes flush before the next session loads it.
@@ -733,7 +745,7 @@ test("SYS-SOFT: soft outer config.yml write also persists across sessions", asyn
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Always allow (save to trusted.json)";
+          return UI.alwaysAllow;
         },
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
@@ -744,7 +756,7 @@ test("SYS-SOFT: soft outer config.yml write also persists across sessions", asyn
       });
       assert.equal(r1, undefined, "outer write allowed");
       assert.ok(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         `soft outer write must offer "Always allow" (tier=three), got: ${choices}`,
       );
       await new Promise((r) => setTimeout(r, 100));
@@ -757,7 +769,7 @@ test("SYS-SOFT: soft outer config.yml write also persists across sessions", asyn
         projectRoot,
         uiChoice: async () => {
           prompted = true;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(s2.pi, { trustedDir, configPaths });
@@ -792,7 +804,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Allow for this session";
+          return UI.allowSession;
         },
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
@@ -802,7 +814,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         input: { path: "/Users/x/.ssh/id_rsa" },
       });
       assert.equal(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         false,
         `hard outer read must NOT offer "Always allow" (tier=two), got: ${choices}`,
       );
@@ -816,7 +828,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async () => {
           promptCount++;
-          return "Allow this call only";
+          return UI.allowOnce;
         },
       });
       registerPermissionGate(s2.pi, { trustedDir, configPaths });
@@ -837,7 +849,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Allow this call only";
+          return UI.allowOnce;
         },
       });
       registerPermissionGate(s3.pi, { trustedDir, configPaths });
@@ -847,7 +859,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         input: { path: "/Users/x/.ssh/config" },
       });
       assert.equal(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         false,
         `~/.ssh/config (hard) must NOT offer "Always allow", got: ${choices}`,
       );
@@ -858,7 +870,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Allow for this session";
+          return UI.allowSession;
         },
       });
       registerPermissionGate(s4.pi, { trustedDir, configPaths });
@@ -868,7 +880,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         input: { path: "/Users/x/.ssh/id_rsa", content: "x" },
       });
       assert.equal(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         false,
         `hard outer write must NOT offer "Always allow" (tier=two), got: ${choices}`,
       );
@@ -883,7 +895,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async (_p, c) => {
           hardChoices = c;
-          return "Allow for this session";
+          return UI.allowSession;
         },
       });
       registerPermissionGate(s5.pi, { trustedDir, configPaths });
@@ -893,7 +905,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         input: { command: "rm -f /Users/x/.ssh/id_rsa" },
       });
       assert.equal(
-        hardChoices.some((c) => c.startsWith("Always allow")),
+        hardChoices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         false,
         `hard outer delete must NOT offer "Always allow" (tier=two), got: ${hardChoices}`,
       );
@@ -906,7 +918,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         projectRoot,
         uiChoice: async (_p, c) => {
           choices = c;
-          return "Always allow this command";
+          return UI.alwaysAllowCmd;
         },
       });
       registerPermissionGate(s6.pi, { trustedDir, configPaths });
@@ -916,7 +928,7 @@ test("SYS-SOFT-HARD: hard outer id_rsa and ssh config stay tier two, no persist"
         input: { command: `rm -f ${softOuter}` },
       });
       assert.equal(
-        choices.some((c) => c.startsWith("Always allow")),
+        choices.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
         true,
         `soft outer delete must offer "Always allow" (tier=three), got: ${choices}`,
       );
@@ -965,7 +977,7 @@ test("SYS-SOFT-DECL: explicit config declaration overrides soft sensitive", asyn
         projectRoot,
         uiChoice: async () => {
           prompted = true;
-          return "Deny";
+          return UI.deny;
         },
       });
       registerPermissionGate(pi, { trustedDir, configPaths });
@@ -1003,7 +1015,7 @@ test("SYS-SOFT-REVOKE: revoking the soft persistent grant re-prompts", async () 
       // Session 1: persist the grant.
       const s1 = createMockPi({
         projectRoot,
-        uiChoice: async () => "Always allow (save to trusted.json)",
+        uiChoice: async () => UI.alwaysAllow,
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
       await fireToolCall(s1.pi, s1.ctx, {
@@ -1030,7 +1042,7 @@ test("SYS-SOFT-REVOKE: revoking the soft persistent grant re-prompts", async () 
         projectRoot,
         uiChoice: async () => {
           promptCount++;
-          return "Allow this call only";
+          return UI.allowOnce;
         },
       });
       registerPermissionGate(s2.pi, { trustedDir, configPaths });
@@ -1068,7 +1080,7 @@ test("SYS-SOFT-FILE: soft persistent grant is keyed by file, not directory", asy
       // Session 1: persist a grant for config.json only.
       const s1 = createMockPi({
         projectRoot,
-        uiChoice: async () => "Always allow (save to trusted.json)",
+        uiChoice: async () => UI.alwaysAllow,
       });
       registerPermissionGate(s1.pi, { trustedDir, configPaths });
       await fireToolCall(s1.pi, s1.ctx, {
@@ -1085,7 +1097,7 @@ test("SYS-SOFT-FILE: soft persistent grant is keyed by file, not directory", asy
         projectRoot,
         uiChoice: async () => {
           promptCount++;
-          return "Allow this call only";
+          return UI.allowOnce;
         },
       });
       registerPermissionGate(s2.pi, { trustedDir, configPaths });

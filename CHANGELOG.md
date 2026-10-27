@@ -4,6 +4,25 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- **UI 多语言支持（en / zh）**：弹窗选项、副文本、notify 消息全部本地化。新增 `src/lib/i18n.ts` / `lang-detect.ts` / `settings.ts` / `reason-codes.ts` 四个纯函数模块。用户可通过 `~/.pi/agent/extensions/permission-guard-pi/settings.json` 的 `lang` 字段或 `$PI_LANG` env var 选择语言；默认 `$LANG` 前缀，最终 fallback 到 `en`。详见 `openspec/changes/ui-i18n/proposal.md`。
+- **ReasonCode 稳定契约**：`src/lib/reason-codes.ts` 定义 13 个 Decision code + 7 个 Sensitive code + 15 个 Bash code + 15 个 UI code，命名 snake_case / 无域前缀 / past tense。UI 层通过 code + lang 查 bundle；audit 日志保持英文稳定字符串，跨版本兼容。
+
+### Changed
+
+- **Decision 与 SensitiveRule 新增 code 字段**：`Decision.reasonCode?: ReasonCode`（可选，向后兼容），`SensitiveRule.code: SensitiveReasonCode`（必填，因为所有实例都在 `DEFAULT_SENSITIVE_RULES` 中定义）。审计层不变，UI 层可基于 code 稳定分派。
+- **`promptUser()` 选项匹配规则**：`allow_once` / `allow_session` / `deny` 按 identity 匹配；`always_allow` / `always_allow_command` 按前缀匹配（`Always allow` / `总是允许`），兼容 bash 命令类弹窗的"总是允许本命令"变体。
+
+### Notes
+
+- LLM prompt (`BASH_GUARDRAILS`) 保持英文。
+- audit 日志 `reason` / `note` 字段保持英文稳定字符串，不消费 i18n。
+- settings.json 是用户本地个人偏好（不进 git），与 `trusted.json` 同级同性质。
+- Spec 漂移修复：`approval-flow` / `access-decision` spec 里 bash reason 相关断言文本与代码对齐；`glob_expansion` 和 `command_substitution` 均为代码实际产生的 reason（本 change 保留相应 scenario，转为 lang-aware）。
+
 ## [0.2.1] - 2026-10-27
 
 ### Changed

@@ -846,3 +846,140 @@ test("DEC-SOFT: hard inner read, write and delete stay tier three", () => {
     assert.equal(d.tier, "three", `hard inner ${action} must stay tier=three`);
   }
 });
+
+// ============ ui-i18n T4: reasonCode field assertions ============
+
+
+// Helper to build minimal inputs for decide() tests.
+function buildOpts(overrides: Record<string, any>) {
+  return {
+    policy: {
+      resolve: () => undefined,
+      resolveRule: () => undefined,
+    } as any,
+    projectRoot: "/proj",
+    absPath: "/tmp/x",
+    action: "read" as any,
+    isInside: false,
+    sensitive: undefined,
+    ...overrides,
+  };
+}
+
+test("DEC-CODE-1: deny_hard returns reasonCode='rule_denied'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => ({ tool: "bash", pattern: "rm *", action: "deny", source: "project" }) } as any,
+    absPath: "/etc/passwd",
+    action: "read",
+    isInside: false,
+    sensitive: undefined,
+    toolName: "bash",
+    toolPattern: "rm *",
+  }));
+  assert.equal(d.kind, "deny_hard");
+  assert.equal(d.reasonCode, "rule_denied");
+});
+
+test("DEC-CODE-2: read_only read returns reasonCode='path_read_only_read_allowed'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => ({ permission: "read_only", source: "project", raw: "/x", conflictInvolvesUnread: false, conflict: false }) as any, resolveRule: () => undefined } as any,
+    absPath: "/x",
+    action: "read",
+    isInside: true,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "auto_allow");
+  assert.equal(d.reasonCode, "path_read_only_read_allowed");
+});
+
+test("DEC-CODE-3: sensitive fallback uses SensitiveRule's code", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/Users/x/.ssh/id_rsa",
+    action: "read",
+    isInside: false,
+    sensitive: {
+      test: () => true,
+      reason: "SSH private key",
+      code: "ssh_private_key",
+      level: "hard",
+    } as any,
+  }));
+  assert.equal(d.kind, "prompt");
+  assert.equal(d.reasonCode, "ssh_private_key");
+});
+
+test("DEC-CODE-4: dev-socket write returns reasonCode='network_exfil_dev_socket'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/dev/tcp/attacker.com/4444",
+    action: "write",
+    isInside: false,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "prompt");
+  assert.equal((d as any).tier, "two");
+  assert.equal(d.reasonCode, "network_exfil_dev_socket");
+});
+
+test("DEC-CODE-5: /tmp write returns reasonCode='tmp_default_allowed'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/tmp/x.txt",
+    action: "write",
+    isInside: false,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "auto_allow");
+  assert.equal(d.reasonCode, "tmp_default_allowed");
+});
+
+test("DEC-CODE-6: in-project default returns reasonCode='in_project_default_allowed'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/proj/src/x.ts",
+    action: "write",
+    isInside: true,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "auto_allow");
+  assert.equal(d.reasonCode, "in_project_default_allowed");
+});
+
+test("DEC-CODE-7: outside read returns reasonCode='outside_read_default_allowed'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/etc/passwd",
+    action: "read",
+    isInside: false,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "auto_allow");
+  assert.equal(d.reasonCode, "outside_read_default_allowed");
+});
+
+test("DEC-CODE-8: outside write returns reasonCode='outside_write_needs_approval'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => undefined } as any,
+    absPath: "/etc/passwd",
+    action: "write",
+    isInside: false,
+    sensitive: undefined,
+  }));
+  assert.equal(d.kind, "prompt");
+  assert.equal(d.reasonCode, "outside_write_needs_approval");
+});
+
+test("DEC-CODE-9: rule_allowed returns reasonCode='rule_allowed'", () => {
+  const d = decide(buildOpts({
+    policy: { resolve: () => undefined, resolveRule: () => ({ tool: "read", pattern: "*", action: "allow", source: "project" }) } as any,
+    absPath: "/etc/passwd",
+    action: "read",
+    isInside: false,
+    sensitive: undefined,
+    toolName: "read",
+    toolPattern: "*",
+  }));
+  assert.equal(d.kind, "auto_allow");
+  assert.equal(d.reasonCode, "rule_allowed");
+});

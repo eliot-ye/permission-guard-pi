@@ -18,6 +18,16 @@ import { join } from "node:path";
 import { realpath } from "node:fs/promises";
 
 import { registerPermissionGate } from "../extensions/index.ts";
+import { t } from "../src/lib/i18n.ts";
+import { detectLang } from "../src/lib/lang-detect.ts";
+
+const UI = {
+  allowOnce: t("choice_allow_once", detectLang(process.env, {})),
+  allowSession: t("choice_allow_session", detectLang(process.env, {})),
+  alwaysAllow: t("choice_always_allow", detectLang(process.env, {})),
+  alwaysAllowCmd: t("choice_always_allow_command", detectLang(process.env, {}), { path: "trusted.json" }),
+  deny: t("choice_deny", detectLang(process.env, {})),
+};
 
 // -------- Mock pi (same shape as sys-integration.test.ts) --------
 
@@ -94,7 +104,7 @@ test("SYS9: bash cat sensitive-outer with allow_session does not silently grant 
       projectRoot,
       uiChoice: async () => {
         promptCalls++;
-        return "Allow for this session";
+        return UI.allowSession;
       },
     });
     registerPermissionGate(pi, {
@@ -160,7 +170,7 @@ test("SYS10: sensitive path INSIDE project prompts tier=three (persistent allowe
       projectRoot,
       uiChoice: async (_p, choices) => {
         capturedChoices = choices;
-        return "Deny";
+        return UI.deny;
       },
     });
     registerPermissionGate(pi, {
@@ -210,7 +220,7 @@ test("SYS11: explicit config overrides inner sensitive (still auto-allows)", asy
       projectRoot,
       uiChoice: async () => {
         promptCalled = true;
-        return "Deny";
+        return UI.deny;
       },
     });
     registerPermissionGate(pi, {

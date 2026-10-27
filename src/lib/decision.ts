@@ -58,11 +58,19 @@ export type Declaration =
   | "sensitive_default"
   | "unconfigured";
 
+import type { DecisionReasonCode } from "./reason-codes.ts";
+import type { SensitiveReasonCode } from "./reason-codes.ts";
+
 export interface DecisionCommon {
   region: Region;
   declaration: Declaration;
   configured: boolean;
   reason: string;
+  // Stable i18n code for this decision. Optional — legacy code paths may not
+  // populate it. Uses DecisionReasonCode for most branches; the sensitive
+  // fallback branch (step 2b) uses SensitiveReasonCode because it points at
+  // the underlying sensitive rule.
+  reasonCode?: DecisionReasonCode | SensitiveReasonCode;
 }
 
 export type Decision =
@@ -106,6 +114,7 @@ export function decide(opts: {
         declaration: "unconfigured",
         configured: false,
         reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
+        reasonCode: "rule_denied",
         denial: { reason: `Rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source} denies this ${toolName} call` },
       };
     }
@@ -125,6 +134,7 @@ export function decide(opts: {
         tier: "three",
         conflict: true,
         reason: `Cross-source conflict involving unread for ${absPath} (winner: ${entry.permission} from ${entry.source}, but another source declares unread)`,
+        reasonCode: "cross_source_unread_conflict",
       };
     }
 
@@ -136,6 +146,7 @@ export function decide(opts: {
         declaration: "unread",
         configured: true,
         reason: `Path is hard-denied by ${entry.source} config (${entry.raw})`,
+        reasonCode: "path_unread_hard_deny",
         denial: { reason: `Path declared unread in ${entry.source} config` },
       };
     }
@@ -151,6 +162,7 @@ export function decide(opts: {
           authorization: "presumed",
           grant_source: "config_declaration",
           reason: `Path declared read_only in ${entry.source} config; read allowed`,
+          reasonCode: "path_read_only_read_allowed",
         };
       }
       return {
@@ -160,6 +172,7 @@ export function decide(opts: {
         configured: true,
         tier: "three",
         reason: `Path declared read_only in ${entry.source} config; ${action} requires approval`,
+        reasonCode: "path_read_only_action_needs_approval",
       };
     }
 
@@ -174,6 +187,7 @@ export function decide(opts: {
           authorization: "presumed",
           grant_source: "config_declaration",
           reason: `Path declared read_write in ${entry.source} config; in-project ${action} auto-allowed`,
+          reasonCode: "path_read_write_inner_allowed",
         };
       }
       return {
@@ -183,6 +197,7 @@ export function decide(opts: {
         configured: true,
         tier: "three",
         reason: `Path declared read_write in ${entry.source} config; outside-project ${action} requires approval`,
+        reasonCode: "path_read_write_outside",
       };
     }
   }
@@ -205,6 +220,7 @@ export function decide(opts: {
         authorization: "presumed",
         grant_source: "allow_rule",
         reason: `Allowed by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
+        reasonCode: "rule_allowed",
       };
     }
   }
@@ -228,6 +244,7 @@ export function decide(opts: {
       configured: false,
       tier: "two",
       reason: `Network exfiltration path: ${absPath}`,
+      reasonCode: "network_exfil_dev_socket",
     };
   }
 
@@ -260,6 +277,7 @@ export function decide(opts: {
       configured: false,
       tier,
       reason: `Sensitive file (${sensitive.reason}): ${absPath}`,
+      reasonCode: sensitive.code,
     };
   }
 
@@ -276,6 +294,7 @@ export function decide(opts: {
       authorization: "presumed",
       grant_source: "default",
       reason: `Temporary directory default: ${absPath}`,
+      reasonCode: "tmp_default_allowed",
     };
   }
 
@@ -290,6 +309,7 @@ export function decide(opts: {
       authorization: "presumed",
       grant_source: "default",
       reason: `In-project non-sensitive ${action}; auto-allowed`,
+      reasonCode: "in_project_default_allowed",
     };
   }
 
@@ -303,6 +323,7 @@ export function decide(opts: {
       authorization: "presumed",
       grant_source: "default",
       reason: `Outside-project non-sensitive read; auto-allowed`,
+      reasonCode: "outside_read_default_allowed",
     };
   }
 
@@ -316,6 +337,7 @@ export function decide(opts: {
     configured: false,
     tier: "three",
     reason: `Outside-project non-sensitive ${action}; approval required`,
+    reasonCode: "outside_write_needs_approval",
   };
 }
 

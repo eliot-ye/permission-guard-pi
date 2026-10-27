@@ -64,6 +64,38 @@ When you declare a broad glob in `permission.json` (e.g. `{"~/.ssh/**": "read_wr
 
 > Full parser semantics, silent-command whitelist, and known blind spots: [`docs/security/permission-model.md`](./docs/security/permission-model.md).
 
+## Language / i18n
+
+UI strings (dialog titles, choices, subtitles, notify messages) are localized. **Audit log `reason` and LLM prompts (`BASH_GUARDRAILS`) remain in English** — they are stable cross-version contracts, not UI.
+
+### Selecting a language
+
+Resolution order (first match wins):
+
+1. `$PI_LANG` env var (`en` | `zh`)
+2. `~/.pi/agent/extensions/permission-guard-pi/settings.json` → `{ "lang": "en" | "zh" }`
+3. `$LANG` first two chars (`zh_CN.UTF-8` → `zh`; `en_US.UTF-8` → `en`)
+4. Fallback: `"en"`
+
+Create `~/.pi/agent/extensions/permission-guard-pi/settings.json` to set a per-user default (JSONC, so comments and trailing commas are fine):
+
+```jsonc
+// ~/.pi/agent/extensions/permission-guard-pi/settings.json
+{
+  "lang": "zh"
+}
+```
+
+Or override per-session with the env var: `PI_LANG=zh pi`.
+
+Language is resolved **once per pi session** (at `registerPermissionGate` startup) — changing `settings.json` requires a pi restart to take effect.
+
+### Stability guarantees
+
+- **ReasonCode** (`src/lib/reason-codes.ts`) is a stable contract: 13 decision + 7 sensitive + 15 bash codes, snake_case, no domain prefix. Codes don't get renamed once shipped; only new codes can be added.
+- **Audit log `reason` field** stays in English regardless of UI language. This lets you `grep` and script against audit logs across versions.
+- **`BASH_GUARDRAILS`** (the LLM-side prompt block) stays in English.
+
 ## Uninstall
 
 ```bash

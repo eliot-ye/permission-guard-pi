@@ -6,6 +6,8 @@
 
 import { dirname, basename } from "node:path";
 
+import type { SensitiveReasonCode } from "./reason-codes.ts";
+
 // Soft (pardonable) credential-config matching vocabulary. Hoisted to module
 // scope so the 16-way basename comparison below allocates nothing per call —
 // findSensitiveMatch runs on every tool call, including per target in a bash
@@ -16,6 +18,10 @@ const SOFT_CONFIG_EXTS = [".json", ".toml", ".yml", ".yaml"];
 export interface SensitiveRule {
   test: (absolutePath: string) => boolean;
   reason: string;
+  // Stable i18n code for this rule (see reason-codes.ts SensitiveReasonCode).
+  // Required — every rule declares it. UI layer looks up bundles by this code;
+  // audit layer keeps using `reason` (English stable string).
+  code: SensitiveReasonCode;
   // "hard"  = non-revocable credential (private key): outer stays tier=two,
   //           no "Always allow" — a leak is not recoverable by rotating a
   //           token.
@@ -59,6 +65,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "SSH private key",
+    code: "ssh_private_key",
     level: "hard",
     // Canonical representative private-key paths this rule matches. Only
     // .pem/.key extensions are covered here — the private-key-extension
@@ -86,6 +93,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "Private key / certificate file",
+    code: "private_key_cert",
     level: "hard",
     // Representative absolute paths for the two most common private-key
     // extensions. Other extensions (.pfx/.p12/.jks/.kdbx/.asc/.gpg) are
@@ -130,6 +138,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       return false;
     },
     reason: "Env file or credential store",
+    code: "env_credential_store",
     level: "hard",
     // Representative credential-store entries. This rule covers MANY
     // basenames across many dirs; anchors list the most common patterns.
@@ -161,6 +170,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "Credential config",
+    code: "credential_config",
     level: "hard",
     anchor: [
       "~/.aws/credentials",
@@ -208,6 +218,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "System credential/config file",
+    code: "system_credential_config",
     level: "hard",
     anchor: [
       "/etc/shadow",
@@ -246,6 +257,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "SSH public key file",
+    code: "ssh_public_key",
     level: "soft",
   },
   {
@@ -273,6 +285,7 @@ export const DEFAULT_SENSITIVE_RULES: SensitiveRule[] = [
       );
     },
     reason: "Soft credential config file",
+    code: "soft_credential_config",
     level: "soft",
   },
 ];

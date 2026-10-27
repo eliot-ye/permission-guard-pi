@@ -19,6 +19,25 @@ import { join } from "node:path";
 // Import the extension factory. We treat it as a plain function to test with
 // a mock pi API.
 import { registerPermissionGate } from "../extensions/index.ts";
+import { t } from "../src/lib/i18n.ts";
+import { detectLang } from "../src/lib/lang-detect.ts";
+
+// i18n-aware UI choice strings. promptUser() matches by identity of the
+// localized strings it built, so tests must return the same strings.
+// We detect the current test-env lang (same as the extension does at
+// session init) so this works regardless of the developer's LANG env var.
+const UI = {
+  allowOnce: t("choice_allow_once", detectLang(process.env, {})),
+  allowSession: t("choice_allow_session", detectLang(process.env, {})),
+  alwaysAllow: t("choice_always_allow", detectLang(process.env, {})),
+  alwaysAllowCmd: t("choice_always_allow_command", detectLang(process.env, {}), { path: "trusted.json" }),
+  deny: t("choice_deny", detectLang(process.env, {})),
+};
+
+// Helper: get a localized UI string by code (uses the same detected lang
+// as the UI constants above, so tests stay language-agnostic).
+const uiText = (code: string, params?: Record<string, string>) =>
+  t(code, detectLang(process.env, {}), params);
 
 // -------- Mocks --------
 
@@ -59,7 +78,7 @@ function createMockPi(opts: {
   const notifications: Array<{ message: string; level: string }> = [];
   const uiChoice =
     opts.uiChoice ??
-    (async (_prompt: string, choices: string[]) => choices[0] || "Allow this call only");
+    (async (_prompt: string, choices: string[]) => choices[0] || UI.allowOnce);
 
   const ctx: MockContext = {
     hasUI: opts.hasUI ?? true,
@@ -189,8 +208,8 @@ test("AF1: three_tier_prompt_shows_four_options", async () => {
       input: { path: "/opt/x", content: "hi" },
     });
 
-    // Should be blocked (user chose "Allow this call only" but this is tier=three)
-    // Actually: with default choice "Allow this call only", result should be undefined (allow once).
+    // Should be blocked (user chose UI.allowOnce but this is tier=three)
+    // Actually: with default choice UI.allowOnce, result should be undefined (allow once).
     assert.equal(result, undefined, "allow-once should not block");
     // And choices should have 4 options.
     assert.ok(capturedChoices, "should have shown choices");
@@ -281,7 +300,7 @@ test("AF3: three_tier_prompt_mentions_trusted_json_path", async () => {
       },
       uiChoice: async (prompt) => {
         capturedPrompt = prompt;
-        return "Deny";
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -331,7 +350,7 @@ test("AF4: two_tier_prompt_mentions_no_persistent_option", async () => {
       },
       uiChoice: async (prompt) => {
         capturedPrompt = prompt;
-        return "Deny";
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -354,7 +373,7 @@ test("AF4: two_tier_prompt_mentions_no_persistent_option", async () => {
     });
 
     assert.ok(
-      capturedPrompt.includes("敏感系统路径不能持久化"),
+      capturedPrompt.includes(uiText("subtitle_sensitive_hard_not_persistable")),
       `prompt should mention sensitive paths cannot be persisted: ${capturedPrompt}`,
     );
   });
@@ -382,7 +401,7 @@ test("AF5: hard_deny_notifies_warning_without_prompt", async () => {
       },
       uiChoice: async () => {
         promptCalled = true;
-        return "Deny";
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -470,7 +489,7 @@ test("AF7: allow_once_does_not_persist_to_memory", async () => {
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Allow this call only",
+      uiChoice: async () => UI.allowOnce,
       projectRoot: "/proj",
     });
 
@@ -494,7 +513,7 @@ test("AF7: allow_once_does_not_persist_to_memory", async () => {
     let promptedCount = 0;
     const promptFn: UIChoiceHandler = async () => {
       promptedCount++;
-      return "Allow this call only";
+      return UI.allowOnce;
     };
     ctx.ui.select = promptFn;
 
@@ -527,7 +546,7 @@ test("AF8: allow_session_persists_within_session", async () => {
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Allow for this session",
+      uiChoice: async () => UI.allowSession,
       projectRoot: "/proj",
     });
 
@@ -551,7 +570,7 @@ test("AF8: allow_session_persists_within_session", async () => {
     let promptedCount = 0;
     ctx.ui.select = async () => {
       promptedCount++;
-      return "Deny";
+      return UI.deny;
     };
 
     await fireToolCall(pi, ctx, {
@@ -584,7 +603,7 @@ test("AF9: allow_persistent_persists_across_sessions", async () => {
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Always allow (save to trusted.json)",
+      uiChoice: async () => UI.alwaysAllow,
       projectRoot: "/proj",
     });
 
@@ -657,7 +676,7 @@ test("AF10: user_deny_writes_audit_record", async () => {  await withTmpDir(asyn
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Deny",
+      uiChoice: async () => UI.deny,
       projectRoot: "/proj",
     });
 
@@ -725,7 +744,7 @@ test("AF11: cross-source conflict + user_deny emits conflict_prompt event", asyn
     const { pi, ctx } = createMockPi({
       trustedDir: dir,
       configPaths,
-      uiChoice: async () => "Deny",
+      uiChoice: async () => UI.deny,
       projectRoot,
     });
 
@@ -887,7 +906,7 @@ test("AFS1: two_tier_prompt_shows_sensitive_subtitle", async () => {
       },
       uiChoice: async (prompt) => {
         capturedPrompt = prompt;
-        return "Deny";
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -909,7 +928,7 @@ test("AFS1: two_tier_prompt_shows_sensitive_subtitle", async () => {
     });
 
     assert.ok(
-      capturedPrompt.includes("敏感系统路径不能持久化"),
+      capturedPrompt.includes(uiText("subtitle_sensitive_hard_not_persistable")),
       `sensitive subtitle expected; got: ${capturedPrompt}`,
     );
     // Must NOT mention trusted.json (the bash-unreliable path is different)
@@ -942,7 +961,7 @@ test("AFS2: two_tier_prompt_shows_unreliable_bash_subtitle", async () => {
       },
       uiChoice: async (prompt) => {
         capturedPrompt = prompt;
-        return "Deny";
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -964,7 +983,7 @@ test("AFS2: two_tier_prompt_shows_unreliable_bash_subtitle", async () => {
     });
 
     assert.ok(
-      capturedPrompt.includes("无法静态解析"),
+      capturedPrompt.includes(uiText("heredoc")),
       `unreliable bash subtitle expected; got: ${capturedPrompt}`,
     );
     // Must NOT mention permission.json (config cannot fix this)
@@ -1008,9 +1027,9 @@ test("SYS-B1: bash session grant + unread path → hard_deny audit (grant bypass
       },
       uiChoice: async (_p, choices) => {
         allowSessionCount++;
-        // First time → "Allow for this session". Second time shouldn't
+        // First time → UI.allowSession. Second time shouldn't
         // hit the prompt at all (grant should be active).
-        return choices.find((c) => c.includes("session")) ?? choices[0];
+        return UI.allowSession;
       },
       projectRoot: "/proj",
     });
@@ -1024,13 +1043,13 @@ test("SYS-B1: bash session grant + unread path → hard_deny audit (grant bypass
       },
     });
 
-    // First call: no grant yet, tier=two prompt → user picks "Allow for this session"
+    // First call: no grant yet, tier=two prompt → user picks UI.allowSession
     const firstResult = await fireToolCall(pi, ctx, {
       toolName: "bash",
       toolCallId: "tc-c5-1",
       input: { command },
     });
-    // First call should be allowed (choice is "Allow for this session")
+    // First call should be allowed (choice is UI.allowSession)
     assert.equal(firstResult, undefined, "first call should be allowed (allow_session)");
     assert.equal(allowSessionCount, 1, "should have prompted once");
 
@@ -1085,7 +1104,7 @@ test("SYS-B2: bash persistent grant + unread path → hard_deny (grant bypassed)
         local: join("/proj", ".pi/local/permission.json"),
       },
       uiChoice: async (_p, choices) => {
-        return choices.find((c) => c.toLowerCase().includes("always")) ?? choices[0];
+        return UI.alwaysAllowCmd;
       },
       projectRoot: "/proj",
     });
@@ -1175,7 +1194,7 @@ test("SYS-B3: bash grant hit + no unread → grant still auto-allow", async () =
       },
       uiChoice: async (_p, choices) => {
         promptCount++;
-        return choices.find((c) => c.includes("session")) ?? choices[0];
+        return UI.allowSession;
       },
       projectRoot: "/proj",
     });
@@ -1237,7 +1256,7 @@ test("SYS-B4: bash grant + multi-path where ONE is unread → hard_deny", async 
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async (_p, choices) => choices.find((c) => c.includes("session")) ?? choices[0],
+      uiChoice: async (_p, choices) => UI.allowSession,
       projectRoot: "/proj",
     });
 
@@ -1303,7 +1322,7 @@ test("T-EXT-P1: allow_persistent_audit_carries_by_person_and_config_declaration"
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Always allow (save to trusted.json)",
+      uiChoice: async () => UI.alwaysAllow,
       projectRoot: "/proj",
     });
     registerPermissionGate(pi, {
@@ -1349,7 +1368,7 @@ test("T-EXT-P2: user_deny_audit_carries_by_person", async () => {
         project: join("/proj", ".pi/permission.json"),
         local: join("/proj", ".pi/local/permission.json"),
       },
-      uiChoice: async () => "Deny",
+      uiChoice: async () => UI.deny,
       projectRoot: "/proj",
     });
     registerPermissionGate(pi, {
@@ -1442,7 +1461,7 @@ test("T-EXT-P3: bash_session_grant_audit_grant_source_is_bash_grant_memory", asy
         local: join("/proj", ".pi/local/permission.json"),
       },
       uiChoice: async (_p, choices) =>
-        choices.find((c) => c.includes("session")) ?? choices[0],
+        UI.allowSession,
       projectRoot: "/proj",
     });
     registerPermissionGate(pi, {
@@ -1492,7 +1511,7 @@ test("T-EXT-B1: bash_grant_memory_hit_auto_allow_audit_carries_bash_grant_memory
         local: join("/proj", ".pi/local/permission.json"),
       },
       uiChoice: async (_p, choices) =>
-        choices.find((c) => c.includes("session")) ?? choices[0],
+        UI.allowSession,
       projectRoot: "/proj",
     });
     registerPermissionGate(pi, {
@@ -1595,7 +1614,7 @@ test("AF1-A1: unreliable bash prompt shows FOUR options (tier=three)", async () 
       },
       uiChoice: async (_p, choices) => {
         capturedChoices = choices;
-        return choices.find((c) => c.toLowerCase().includes("deny")) ?? choices[0];
+        return UI.deny;
       },
       projectRoot: "/proj",
     });
@@ -1622,7 +1641,7 @@ test("AF1-A1: unreliable bash prompt shows FOUR options (tier=three)", async () 
       `unreliable bash should show 4 options (tier=three); got ${capturedChoices!.length}: ${capturedChoices!.join(", ")}`,
     );
     assert.ok(
-      capturedChoices!.some((c) => c.toLowerCase().includes("always allow")),
+      capturedChoices!.some((c) => c.startsWith(UI.alwaysAllow.slice(0, 4)) || c.startsWith("Always allow")),
       `unreliable bash prompt must offer "Always allow"; got: ${capturedChoices!.join(", ")}`,
     );
   });
@@ -1650,7 +1669,7 @@ test("AF2-A1: unreliable bash \"always allow this command\" persists to bashGran
         local: join("/proj", ".pi/local/permission.json"),
       },
       uiChoice: async (_p, choices) => {
-        return choices.find((c) => c.toLowerCase().includes("always allow")) ?? choices[0];
+        return UI.alwaysAllowCmd;
       },
       projectRoot: "/proj",
     });

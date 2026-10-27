@@ -42,6 +42,10 @@ import { createTrustStore, type TrustStore } from "../src/lib/trust.ts";
 import { createAuditLogger, type AuditLogger } from "../src/lib/audit.ts";
 import { extractBashTargets, tokenizeBashCommand, looksLikePathToken, type ExtractResult } from "../src/lib/bash-extract.ts";
 import { decide, type Decision } from "../src/lib/decision.ts";
+import { t } from "../src/lib/i18n.ts";
+import type { Lang, BashReasonCode, ReasonCode, UiCode } from "../src/lib/reason-codes.ts";
+import { detectLang } from "../src/lib/lang-detect.ts";
+import { loadSettings } from "../src/lib/settings.ts";
 
 // -------- Config for the extension registration --------
 
@@ -68,6 +72,10 @@ interface SessionState {
   trust: TrustStore;
   audit: AuditLogger;
   configWarningEmitted: boolean;
+  // UI language (ui-i18n T5). Read once at session start from $PI_LANG /
+  // settings.json / $LANG, in that priority order. Absent at all sources
+  // falls back to "en".
+  lang: Lang;
 }
 
 // -------- Type aliases for the extension surface --------
@@ -134,6 +142,11 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
   const trust = await createTrustStore(trustedPath);
   const audit = createAuditLogger(auditLogPath);
 
+  // i18n T5: read settings.json + detect lang at session start. Once
+  // computed, lang is stable for the whole session (design.md D7).
+  const settings = await loadSettings(opts.trustedDir);
+  const lang = detectLang(process.env, settings);
+
   return {
     policy,
     warnings,
@@ -142,6 +155,7 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
     trust,
     audit,
     configWarningEmitted: false,
+    lang,
   };
 }
 
@@ -220,29 +234,46 @@ export function bashPermissionForReason(reason: string | undefined): "read_only"
 }
 
 /**
- * Build a tier=two subtitle specifically for a bash command class. Each
- * extraction reason gets its own remediation hint so the user sees how to
- * avoid repeating the prompt (spec approval-flow, D5).
+ * Map a raw extractor reason string to a stable BashReasonCode.
+ * Some extractor reasons carry runtime params (e.g. `unresolved variable: X`);
+ * we strip the param and return the code, keeping the param separately.
+ *
+ * Returns [code, params] so bashSubtitleForReason can inject the param
+ * into the localized subtitle.
  */
-export function bashSubtitleForReason(reason: string | undefined): string {
-  if (reason === "glob_expansion") {
-    return "该命令含未加引号的 glob 通配符，无法静态枚举目标文件。如需避免重复弹窗，请在 permission.json 中声明该路径 glob，或选择「会话内允许」";
+function bashReasonCodeAndParams(
+  reason: string | undefined,
+): [BashReasonCode, Record<string, string>] {
+  if (!reason) return ["unreliable_command", {}];
+  if (reason === "unresolved variable" || /^unresolved variable:\s*/.test(reason)) {
+    const m = /^unresolved variable:\s*(\S+)$/.exec(reason);
+    return ["unresolved_variable", { var_name: m ? m[1] : "" }];
   }
-  if ((reason ?? "").startsWith("unresolved variable:")) {
-    return "该命令包含未展开的 shell 变量，无法静态枚举目标文件。选择「会话内允许」可避免重复弹窗";
+  // Direct code match — all other bash-extract reasons are exact codes.
+  const codes = new Set<string>([
+    "control_flow", "shell_forwarder", "cd_chdir", "forwarding_command",
+    "find_write_flag", "command_substitution", "backtick_substitution",
+    "process_substitution_input", "process_substitution_output", "heredoc",
+    "subshell", "glob_expansion", "arithmetic", "unreliable_command",
+  ] as const);
+  if (codes.has(reason)) {
+    return [reason as BashReasonCode, {}];
   }
-  switch (reason) {
-    case "control_flow":
-      return "该命令包含控制流关键字（while/for/if 等），实际访问文件取决于运行时变量，无法静态确定。建议使用 grep/find 等工具替代 shell 循环；选择「会话内允许」可避免重复弹窗";
-    case "shell_forwarder":
-      return "该命令通过 shell 转发器执行，字符串内的文件系统访问不可见于静态分析。建议直接执行命令而非嵌套 shell；选择「会话内允许」可避免重复弹窗";
-    case "forwarding_command":
-      return "该命令使用转发器（xargs/parallel 等），下游参数来自上游 stdout，无法静态枚举。建议避免在管道后使用转发器；选择「会话内允许」可避免重复弹窗";
-    case "cd_chdir":
-      return "该命令包含 cd 命令，改变后续命令的工作目录，无法静态确定实际访问的文件路径。建议使用绝对路径；选择「会话内允许」可避免重复弹窗";
-    default:
-      return "命令无法静态解析，请审阅整条命令；选择「会话内允许」可避免重复弹窗";
-  }
+  // Fallback for anything we didn't map.
+  return ["unreliable_command", {}];
+}
+
+/**
+ * Build a subtitle for a bash command prompt. ui-i18n T5: text comes
+ * from the i18n bundle (t()), not hardcoded strings. Params like the
+ * variable name for unresolved_variable are injected via params.
+ */
+export function bashSubtitleForReason(
+  reason: string | undefined,
+  lang: Lang,
+): string {
+  const [code, params] = bashReasonCodeAndParams(reason);
+  return t(code, lang, params);
 }
 
 async function promptUser(
@@ -252,32 +283,40 @@ async function promptUser(
   trustedPath: string,
   subtitle?: string,
   bashReason?: string | null,
+  lang: Lang = "en",
 ): Promise<UserChoice> {
   if (!ctx.hasUI || !ctx.ui) return "deny";
 
-  const title = `Permission request\n\n${message}`;
+  // ui-i18n T5: all visible strings come from t() bundle lookup. Choice
+  // matching uses the localized string to preserve behavior.
+  const title = `${t("permission_request_title" as UiCode, lang)}\n\n${message}`;
+  const optAllowOnce = t("choice_allow_once" as UiCode, lang);
+  const optAllowSession = t("choice_allow_session" as UiCode, lang);
+  const optDeny = t("choice_deny" as UiCode, lang);
 
   if (tier === "three") {
+    const optAlwaysAllow = t("choice_always_allow" as UiCode, lang);
+    const optAlwaysAllowCmd = t("choice_always_allow_command" as UiCode, lang, {
+      path: prettyPath(trustedPath),
+    });
+    // Prefix that covers both variants across languages. In English the
+    // prefix is "Always allow"; in Chinese "总是允许" covers both the
+    // path-persistent form ("总是允许（保存到 ...）") and the bash-command
+    // form ("总是允许本命令（保存到 ...）").
+    const optAlwaysAllowPrefix = lang === "en" ? "Always allow" : "总是允许";
     const choices = bashReason
-      ? [
-          "Allow this call only",
-          "Allow for this session",
-          `Always allow this command (save to ${prettyPath(trustedPath)})`,
-          "Deny",
-        ]
-      : [
-          "Allow this call only",
-          "Allow for this session",
-          "Always allow (save to trusted.json)",
-          "Deny",
-        ];
+      ? [optAllowOnce, optAllowSession, optAlwaysAllowCmd, optDeny]
+      : [optAllowOnce, optAllowSession, optAlwaysAllow, optDeny];
     const noteLine = bashReason
       ? `\n\n${subtitle ?? ""}`
-      : `\n\nNote: "Always allow" saves to ${prettyPath(trustedPath)}`;
+      : `\n\n${t("note_always_allow_saves_to" as UiCode, lang, { path: prettyPath(trustedPath) })}`;
     const choice = await ctx.ui.select(`${title}${noteLine}`, choices);
-    if (choice === "Allow this call only") return "allow_once";
-    if (choice === "Allow for this session") return "allow_session";
-    if (choice.startsWith("Always allow")) return "allow_persistent";
+    // Match by identity for the stable choices; always-allow matches by
+    // prefix so both variants map to `allow_persistent` (regardless of
+    // lang, and regardless of which variant was selected).
+    if (choice === optAllowOnce) return "allow_once";
+    if (choice === optAllowSession) return "allow_session";
+    if (choice.startsWith(optAlwaysAllowPrefix)) return "allow_persistent";
     return "deny";
   }
 
@@ -285,21 +324,16 @@ async function promptUser(
   // Never offers "Always allow" — leaking a private key or writing to a
   // dev-socket is not recoverable by rotating a token, so persisting the
   // permission would be a permanent hole.
-  //
-  // NOTE (tier-contract-consistency A1): the previous bash-command tier=two
-  // special branch (which offered "Always allow this command") has been
-  // removed. Unreliable bash commands now route through tier=three with a
-  // dedicated "Always allow this command" option (above). See design.md A1.
   const footer = subtitle
     ? `${subtitle}`
-    : `No "Always allow" option available for this context.`;
+    : t("footer_no_always_allow_available" as UiCode, lang);
 
   const choice = await ctx.ui.select(
     `${title}\n\n${footer}`,
-    ["Allow this call only", "Allow for this session", "Deny"],
+    [optAllowOnce, optAllowSession, optDeny],
   );
-  if (choice === "Allow this call only") return "allow_once";
-  if (choice === "Allow for this session") return "allow_session";
+  if (choice === optAllowOnce) return "allow_once";
+  if (choice === optAllowSession) return "allow_session";
   return "deny";
 }
 
@@ -453,7 +487,10 @@ export function registerPermissionGate(
       ctxRef.ctx = ctx;
       if (state.warnings.length > 0 && ctx.hasUI && ctx.ui) {
         for (const w of state.warnings) {
-          ctx.ui.notify(`[permission] config warning: ${w}`, "warning");
+          ctx.ui.notify(
+            t("notify_config_warning" as UiCode, state.lang, { warning: w }),
+            "warning",
+          );
         }
       }
     } catch (err) {
@@ -477,7 +514,10 @@ export function registerPermissionGate(
     // Emit config warnings once.
     if (s.warnings.length > 0 && !s.configWarningEmitted && ctx.hasUI && ctx.ui) {
       for (const w of s.warnings) {
-        ctx.ui.notify(`[permission] config warning: ${w}`, "warning");
+        ctx.ui.notify(
+          t("notify_config_warning" as UiCode, s.lang, { warning: w }),
+          "warning",
+        );
       }
       s.configWarningEmitted = true;
     }
@@ -711,7 +751,14 @@ export function registerPermissionGate(
       });
       if (ctx.hasUI && ctx.ui) {
         ctx.ui.notify(
-          `Blocked: ${decision.denial?.reason ?? "hard denied"} (${prettyPath(expandedInput)})`,
+          t(
+            "notify_deny_hard" as UiCode,
+            state.lang,
+            {
+              reason: decision.denial?.reason ?? "hard denied",
+              path: prettyPath(expandedInput),
+            },
+          ),
           "warning",
         );
       }
@@ -858,12 +905,12 @@ export function registerPermissionGate(
     let subtitle: string | undefined;
     if (decision.tier === "three" && bashCommand && bashReason) {
       // Bash-command class prompt: dispatch by extraction reason.
-      subtitle = bashSubtitleForReason(bashReason);
+      subtitle = bashSubtitleForReason(bashReason, state.lang);
     } else if (decision.tier === "two") {
       if (decision.declaration === "sensitive_default") {
-        subtitle = "敏感系统路径不能持久化，如需长期允许请编辑 permission.json。";
+        subtitle = t("subtitle_sensitive_hard_not_persistable" as UiCode, state.lang);
       } else if (decision.reason.startsWith("Network exfiltration")) {
-        subtitle = "网络外带路径不能持久化，每次写入都需确认。";
+        subtitle = t("subtitle_network_exfil_not_persistable" as UiCode, state.lang);
       }
     }
 
@@ -874,6 +921,7 @@ export function registerPermissionGate(
       trustedPath,
       subtitle,
       bashCommand && bashReason ? bashReason : null,
+      state.lang,
     );
 
     if (choice === "deny") {
@@ -1000,7 +1048,11 @@ export function registerPermissionGate(
           state.trust.addSessionGrant(state.projectHash, action, absPath);
           if (ctx.hasUI && ctx.ui) {
             ctx.ui.notify(
-              `Failed to save persistent grant: ${(err as any).message}. Falling back to session-only.`,
+              t(
+                "notify_persistent_save_failed" as UiCode,
+                state.lang,
+                { error: (err as any).message },
+              ),
               "warning",
             );
           }
@@ -1052,7 +1104,11 @@ export function registerPermissionGate(
           state.trust.addBashSessionGrant(state.projectHash, bashCommand, bashReason ?? "unreliable", bashPermission);
           if (ctx.hasUI && ctx.ui) {
             ctx.ui.notify(
-              `Failed to save persistent bash grant: ${(err as any).message}. Falling back to session-only.`,
+              t(
+                "notify_bash_persistent_save_failed" as UiCode,
+                state.lang,
+                { error: (err as any).message },
+              ),
               "warning",
             );
           }

@@ -174,15 +174,22 @@
 
 **持久化边界**：rawCommand 持久化**不做规范化**——用户第一次批准 `ls -la /tmp`，之后 LLM 写 `ls  -la  /tmp`（多空格）视为不同 rawCommand，会重新弹窗。这是**保守但摩擦**的已知边界，见 grant-memory spec 的"Bash 命令记忆" requirement。
 
+**`bash_reason` 字段契约**（本 change 新增）：`bash_reason` 值是 `extractBashTargets` 返回的 `reason` 字符串。UI 层通过 i18n 模块的 `bashReasonCodeAndParams(reason)` 辅助函数把它拆分为 `ReasonCode` code + `params`：
+- 大多数 reason 值本身就是 snake_case code（如 `command_substitution`、`shell_forwarder`、`control_flow`、`cd_chdir`、`forwarding_command`、`find_write_flag`、`backtick_substitution`、`process_substitution_input`、`process_substitution_output`、`heredoc`、`subshell`、`glob_expansion`、`arithmetic`、`unreliable_command`）；
+- `unresolved variable: ${var_name}` 是**唯一的参数化 reason**：code 为 `unresolved_variable`，变量名走 `params.var_name`；
+- code 类型属于 `BashReasonCode` 联合（见 `src/lib/reason-codes.ts`），共 15 个 code。
+
 #### Scenario: 无法解析的复杂 bash 命令
 
 - **WHEN** bash 命令为 `$(cat $HOME/.ssh/id_rsa | base64) > /tmp/out.txt`
-- **THEN** 若 bash-target-extraction 判定为不可靠（reliable=false，reason 含 command_substitution），决策为 prompt，tier=three，弹窗展示完整命令文本与"总是允许本命令"选项
+- **THEN** 若 bash-target-extraction 判定为不可靠（reliable=false，`bash_reason == "command_substitution"`），决策为 prompt，tier=three，弹窗展示完整命令文本与"总是允许本命令"选项
 
 #### Scenario: 变量展开失败的 bash 命令弹三档
 
 - **WHEN** bash 命令为 `cat $MYSECRETS`，`$MYSECRETS` 未在 shell 环境展开
-- **THEN** 决策为 prompt，tier=three，reason 含 `unresolved variable`，弹窗提供"总是允许本命令"选项
+- **THEN** 决策为 prompt，tier=three，`bash_reason == "unresolved variable: $MYSECRETS"`（code 为 `unresolved_variable`，变量名 `$MYSECRETS` 走 `params.var_name`，符合 snake_case ReasonCode 命名规范），弹窗提供"总是允许本命令"选项
+
+**注**：原 spec 表述为"reason 含 `unresolved variable`"（人类可读的松散字符串），本 delta 同步 spec 与代码：明确 reason 的实际字符串形式为 `"unresolved variable: ${var_name}"`，并标注其对应的 `ReasonCode` code 为 `unresolved_variable`（不加冒号、不带变量名，snake_case 格式）——只改 `THEN` 里的 reason 字段值表述，判定逻辑、tier 分派、行为契约均不变。
 
 #### Scenario: 用户"总是允许本命令"后同 rawCommand 跨会话免弹
 
