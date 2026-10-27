@@ -1099,6 +1099,7 @@ test("SYS-B2: bash persistent grant + unread path → hard_deny (grant bypassed)
       "utf8",
     );
 
+
     const command = "bash /tmp/evil.sh /etc/passwd";
 
     // Session 1: user picks "Always allow" → persistent bash grant written
@@ -1175,6 +1176,173 @@ test("SYS-B2: bash persistent grant + unread path → hard_deny (grant bypassed)
     assert.ok(p2, "expected audit for tc-c5-p2");
     assert.equal(p2.event, "hard_deny");
     assert.ok(String(p2.note).includes("Bash command grant bypassed"));
+  });
+});
+
+// D2 (reverse-spec 2026-10-27): reliable bash command (no grant) whose target
+// hits an `unread` declaration must produce a hard_deny audit record that
+// carries `authorization: "presumed"` — the same provenance as the file-tool
+// hard_deny path (index.ts handleFileTool). Previously the reliable-bash
+// hard_deny emit (index.ts handleBash) omitted the authorization field.
+test("SYS-B2a: reliable_bash_unread_target_hard_deny_carries_presumed_authorization", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/etc/passwd": "unread" } }),
+      "utf8",
+    );
+
+    // Reliable bash read command (cat is in READ_ONLY_COMMANDS) with a target
+    // that is declared unread. No grant seeded → goes through decideTarget.
+    const command = "cat /etc/passwd";
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-b2a",
+      input: { command },
+    });
+    assert.equal(result?.block, true, "unread target should hard-deny the reliable bash command");
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-b2a");
+    assert.ok(rec, "expected hard_deny audit for tc-b2a");
+    assert.equal(rec.event, "hard_deny");
+    assert.equal(rec.authorization, "presumed", "reliable-bash hard_deny MUST carry authorization: presumed");
+    assert.equal("grant_source" in rec, false, "hard_deny MUST NOT carry grant_source");
+  });
+});
+
+// D1 (reverse-spec 2026-10-27): a config-declared auto_allow (read_only read)
+// MUST produce an audit record with event="auto_allow" and the decision's
+// authorization/grant_source passed through (audit-log spec "auto_allow 从决策
+// 对象透传"). Previously the file-tool auto_allow path (index.ts handleFileTool)
+// returned undefined with no audit.log for config-declared / allow-rule reads.
+test("SYS-B2b: config_declared_read_only_read_auto_allow_audited", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/etc/hosts": "read_only" } }),
+      "utf8",
+    );
+
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // read of a read_only-declared path is auto_allow (decision.ts 1c).
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "read",
+      toolCallId: "tc-b2b",
+      input: { path: "/etc/hosts" },
+    });
+    assert.equal(result, undefined, "read_only read should auto-allow (no block)");
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-b2b");
+    assert.ok(rec, "expected auto_allow audit for config-declared read");
+    assert.equal(rec.event, "auto_allow");
+    assert.equal(rec.authorization, "presumed", "config-declared auto_allow is a system decision → presumed");
+    assert.equal(rec.grant_source, "config_declaration", "grant_source must pass through from the decision");
+  });
+});
+
+// D1 (reverse-spec 2026-10-27): reliable bash auto_allow (config-declared
+// target) MUST produce a command-level auto_allow audit record with the
+// decision's authorization/grant_source passed through.
+test("SYS-B2c: reliable_bash_config_declared_auto_allow_audited", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/etc/hosts": "read_only" } }),
+      "utf8",
+    );
+
+    // Reliable bash read command; /etc/hosts is read_only → auto_allow.
+    const command = "cat /etc/hosts";
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-b2c",
+      input: { command },
+    });
+    assert.equal(result, undefined, "reliable bash read_only read should auto-allow");
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-b2c");
+    assert.ok(rec, "expected auto_allow audit for reliable bash config-declared target");
+    assert.equal(rec.event, "auto_allow");
+    assert.equal(rec.tool, "bash");
+    assert.equal(rec.authorization, "presumed", "config-declared auto_allow → presumed");
+    assert.equal(rec.grant_source, "config_declaration");
   });
 });
 

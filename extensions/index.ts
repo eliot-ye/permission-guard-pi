@@ -733,6 +733,7 @@ export function registerPermissionGate(
     // symlinks via tryRealpath BEFORE decideTarget - otherwise a symlink
     // like `/proj/link -> /etc` would bypass outer-region checks by
     // appearing inside the project root.
+    let autoAllowLogged = false;
     for (const target of extraction.targets) {
       const resolvedPath = await tryRealpath(target.path);
       // Check both the target path and its realpath; take the stricter.
@@ -757,6 +758,10 @@ export function registerPermissionGate(
           declaration: decision.declaration,
           permission: null,
           toolCallId: event.toolCallId,
+          // D2 (reverse-spec 2026-10-27): hard_deny is a system decision →
+          // presumed, matching the file-tool hard_deny provenance. grant_source
+          // is omitted because hard_deny is not a grant event at all.
+          authorization: "presumed",
           note: decision.denial?.reason +
             (resolvedPath !== target.path ? ` (resolved from ${target.path})` : ""),
         });
@@ -766,6 +771,29 @@ export function registerPermissionGate(
         return handlePromptDecision(event, ctx, state, decision, resolvedPath, command, target.action);
       }
       // auto_allow: continue to next target.
+      // D1 (reverse-spec 2026-10-27): record a command-level audit for any
+      // non-exception auto_allow (audit-log spec Req 1). The in-project
+      // unconfigured non-sensitive default (in_project_default_allowed) is
+      // the only exception. Record once per bash call to avoid duplicate
+      // records for multi-target commands.
+      if (!autoAllowLogged && decision.reasonCode !== "in_project_default_allowed") {
+        state.audit.log({
+          event: "auto_allow",
+          tool: "bash",
+          project: state.projectHash,
+          projectRoot: state.projectRoot,
+          path: null,
+          command,
+          region: decision.region,
+          declaration: decision.declaration,
+          permission: null,
+          toolCallId: event.toolCallId,
+          authorization: decision.authorization,
+          grant_source: decision.grant_source,
+          note: decision.reason,
+        });
+        autoAllowLogged = true;
+      }
     }
 
     return undefined;
@@ -836,6 +864,30 @@ export function registerPermissionGate(
     }
 
     // auto_allow
+    // D1 (reverse-spec 2026-10-27): audit-log spec Req 1 requires every
+    // decision to be logged EXCEPT "项目内未配置非敏感常规读写" (the
+    // in_project_default_allowed case). All other auto_allows (config
+    // declaration, allow rule, grant memory hit, outside-project read, tmp
+    // default) MUST be recorded with the decision's authorization/grant_source
+    // passed through (audit-log spec "auto_allow 从决策对象透传"). Previously
+    // this path returned undefined with no audit.log.
+    if (decision.reasonCode !== "in_project_default_allowed") {
+      state.audit.log({
+        event: "auto_allow",
+        tool: event.toolName as any,
+        project: state.projectHash,
+        projectRoot: state.projectRoot,
+        path: expandedInput,
+        command: null,
+        region: decision.region,
+        declaration: decision.declaration,
+        permission: null,
+        toolCallId: event.toolCallId,
+        authorization: decision.authorization,
+        grant_source: decision.grant_source,
+        note: decision.reason,
+      });
+    }
     return undefined;
   }
 
