@@ -12,12 +12,19 @@
 //   - Session-start read once, cached in SessionState.
 
 import { promises as fs } from "node:fs";
+import { dirname } from "node:path";
 
 import type { Lang } from "./reason-codes.ts";
 
 export interface Settings {
   /** UI language. Absent or invalid → falls back to env chain. */
   lang?: string;
+  /**
+   * Overall gate enable/disable. Absent → treated as `true` (fail-safe: the
+   * permission gate stays active). Set `false` to disable the whole gate
+   * (tool_call becomes a no-op; pi handles calls natively).
+   */
+  enabled?: boolean;
 }
 
 // -------- JSONC comment stripper (duplicated from config.ts, kept local
@@ -88,4 +95,30 @@ export async function loadSettings(agentExtDir: string): Promise<Settings> {
     // to empty settings. Session continues with env-chain fallback.
     return {};
   }
+}
+
+/**
+ * Persist settings.json to the extension's runtime directory.
+ * Merges into any existing file (preserves unknown fields), writes
+ * JSONC-compatible JSON. Throws on write failure (caller decides how to
+ * surface; the /permission command shows an error notification).
+ */
+export async function saveSettings(
+  agentExtDir: string,
+  settings: Settings,
+): Promise<void> {
+  const filePath = `${agentExtDir}/settings.json`;
+  // Preserve any existing fields not overwritten by `settings`.
+  let merged: Record<string, unknown> = { ...settings };
+  try {
+    const existing = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(stripJsonComments(existing));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      merged = { ...(parsed as Record<string, unknown>), ...settings };
+    }
+  } catch {
+    // Missing or malformed existing file — start fresh from `settings`.
+  }
+  await fs.mkdir(dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(merged, null, 2) + "\n", "utf8");
 }

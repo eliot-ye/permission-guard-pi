@@ -31,13 +31,20 @@ const UI_CODES = [
   "notify_bash_persistent_save_failed",
   "subtitle_sensitive_hard_not_persistable",
   "subtitle_network_exfil_not_persistable",
+  "permission_status_enabled",
+  "permission_status_disabled",
+  "permission_cmd_usage",
+  "permission_cmd_current",
+  "permission_cmd_toggled_on",
+  "permission_cmd_toggled_off",
+  "permission_cmd_write_failed",
 ] as const;
 
 const ALL_CODES = [...ALL_REASON_CODES, ...UI_CODES];
 
-test("i18n: total code count is 50", () => {
-  assert.equal(TOTAL_CODE_COUNT, 50);
-  assert.equal(ALL_CODES.length, 50);
+test("i18n: total code count is 57", () => {
+  assert.equal(TOTAL_CODE_COUNT, 57);
+  assert.equal(ALL_CODES.length, 57);
 });
 
 test("i18n: en bundle covers all 50 codes", () => {

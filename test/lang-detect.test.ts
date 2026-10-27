@@ -71,6 +71,43 @@ test("loadSettings: reads valid JSON file", async () => {
   }
 });
 
+test("loadSettings: enabled false is parsed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "settings-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ enabled: false }));
+    const s = await loadSettings(dir);
+    assert.equal(s.enabled, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadSettings: missing enabled defaults to true (fail-safe)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "settings-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ lang: "zh" }));
+    const s = await loadSettings(dir);
+    // enabled absent → undefined; consumers treat undefined as true (fail-safe)
+    assert.equal(s.enabled, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("saveSettings: writes enabled field and preserves lang", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "settings-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ lang: "zh" }));
+    const { saveSettings } = await import("../src/lib/settings.ts");
+    await saveSettings(dir, { lang: "zh", enabled: false });
+    const s = await loadSettings(dir);
+    assert.equal(s.enabled, false);
+    assert.equal(s.lang, "zh");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("loadSettings: reads JSONC with comments and trailing commas", async () => {
   const dir = await mkdtemp(join(tmpdir(), "settings-"));
   try {

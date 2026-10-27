@@ -90,6 +90,24 @@ Or override per-session with the env var: `PI_LANG=zh pi`.
 
 Language is resolved **once per pi session** (at `registerPermissionGate` startup) — changing `settings.json` requires a pi restart to take effect.
 
+### Enable / disable the permission guard
+
+The whole gate can be turned off (e.g., for a trusted session or debugging). Control it via settings.json or the `/permission` slash command:
+
+```jsonc
+// ~/.pi/agent/extensions/permission-guard-pi/settings.json
+{
+  "enabled": false
+}
+```
+
+- `enabled` absent → **true** (fail-safe: gate stays active)
+- `enabled: false` → gate disabled; `tool_call` returns `undefined` (pi handles tool calls natively, no intercept, **no audit log**)
+- `/permission` — show current state + usage
+- `/permission on` / `/permission off` — toggle and persist to `settings.json`
+
+Changing `enabled` takes effect on the next tool call (unlike `lang`, which is read once at session start). Disabling the gate is an explicit user choice — the tool-call audit trail is suspended while disabled.
+
 ### Stability guarantees
 
 - **ReasonCode** (`src/lib/reason-codes.ts`) is a stable contract: 13 decision + 7 sensitive + 15 bash codes, snake_case, no domain prefix. Codes don't get renamed once shipped; only new codes can be added.

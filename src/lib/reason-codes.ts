@@ -122,7 +122,15 @@ export type UiCode =
   | "notify_bash_persistent_save_failed"
   // Sensitive tier=two subtitle
   | "subtitle_sensitive_hard_not_persistable"
-  | "subtitle_network_exfil_not_persistable";
+  | "subtitle_network_exfil_not_persistable"
+  // permission-toggle (P3): /permission command + footer status marker
+  | "permission_status_enabled"
+  | "permission_status_disabled"
+  | "permission_cmd_usage"
+  | "permission_cmd_current"
+  | "permission_cmd_toggled_on"
+  | "permission_cmd_toggled_off"
+  | "permission_cmd_write_failed";
 
 // -------- Code tables (single source of truth for validation) --------
 

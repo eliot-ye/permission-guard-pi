@@ -12,7 +12,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
@@ -47,6 +47,7 @@ interface MockUI {
   select: UIChoiceHandler;
   notify: (message: string, level: "info" | "warning" | "error") => void;
   input: (prompt: string, defaultValue?: string) => Promise<string>;
+  setStatus: (key: string, text: string | undefined) => void;
 }
 
 interface MockContext {
@@ -59,7 +60,7 @@ interface MockContext {
 
 interface MockExtensionAPI {
   on: (event: string, handler: Function) => () => void;
-  registerCommand: () => void;
+  registerCommand: (name: string, opts: { handler: Function; description?: string }) => void;
   // Other API methods the extension might use
   appendEntry: () => void;
 }
@@ -91,10 +92,12 @@ function createMockPi(opts: {
         notifications.push({ message, level });
       },
       input: async () => "",
+      setStatus: () => {},
     },
   };
 
   const handlers: Record<string, Function[]> = {};
+  const commands: Record<string, { handler: Function; description?: string }> = {};
   const pi: MockExtensionAPI = {
     on: (event: string, handler: Function) => {
       if (!handlers[event]) handlers[event] = [];
@@ -103,12 +106,15 @@ function createMockPi(opts: {
         // (no-op for test)
       };
     },
-    registerCommand: () => {},
+    registerCommand: (name: string, opts) => {
+      commands[name] = opts;
+    },
     appendEntry: () => {},
   };
 
   // Attach internals so test can inspect what was registered.
   (pi as any)._handlers = handlers;
+  (pi as any)._commands = commands;
   (pi as any)._trustedDir = opts.trustedDir;
   (pi as any)._configPaths = opts.configPaths;
   (pi as any)._ctx = ctx;
@@ -1583,6 +1589,202 @@ test("T-EXT-G1: path_grant_memory_hit_produces_auto_allow_decision", async () =>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ============================================================
+// permission-toggle (P3): gate disabled → tool_call no-op
+// ============================================================
+
+test("PT1: gate_disabled_returns_undefined_no_op", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/opt/x": "read_write" } }),
+      "utf8",
+    );
+    // settings.json with enabled: false
+    await (await import("node:fs/promises")).writeFile(
+      join(dir, "settings.json"),
+      JSON.stringify({ enabled: false }),
+      "utf8",
+    );
+
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // A write to an outer read_write path would normally prompt. But gate is
+    // disabled → tool_call returns undefined (no-op, pi handles natively).
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "pt1",
+      input: { path: "/opt/x", content: "y" },
+    });
+    assert.equal(result, undefined, "disabled gate → no-op (undefined)");
+  });
+});
+
+test("PT2: gate_enabled_default_prompts_normally", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/opt/x": "read_write" } }),
+      "utf8",
+    );
+    // No settings.json → enabled defaults true → gate active (prompts).
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "pt2",
+      input: { path: "/opt/x", content: "y" },
+    });
+    // Wait for the fire-and-forget audit queue to drain.
+    await new Promise((r) => setTimeout(r, 80));
+    // Gate active → prompt shown → default choice allow_once → no block
+    // (undefined result), BUT the gate RAN: it wrote an audit log entry
+    // for the decision. The distinguishing signal vs the disabled no-op is
+    // the audit log (disabled gate writes nothing).
+    const auditFile = join(dir, "logs", "permission-review.jsonl");
+    const raw = await readFile(auditFile, "utf8");
+    const lines = raw.trim().split("\n").filter(Boolean);
+    assert.ok(lines.length > 0, "enabled gate → audit log written (gate ran)");
+  });
+});
+
+// ============================================================
+// permission-toggle (P3): /permission slash command
+// ============================================================
+
+test("PT3: permission_command_toggles_off_and_persists", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/opt/x": "read_write" } }),
+      "utf8",
+    );
+    // No settings.json → enabled defaults true.
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // /permission off
+    const cmd = (pi as any)._commands["permission"];
+    assert.ok(cmd, "permission command should be registered");
+    await cmd.handler("off", ctx);
+
+    // settings.json should now have enabled: false
+    const settingsFile = join(dir, "settings.json");
+    const raw = await readFile(settingsFile, "utf8");
+    const parsed = JSON.parse(raw);
+    assert.equal(parsed.enabled, false, "settings.json should have enabled: false");
+
+    // Gate should now be disabled → tool_call no-op.
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "pt3",
+      input: { path: "/opt/x", content: "y" },
+    });
+    assert.equal(result, undefined, "after /permission off → no-op");
+  });
+});
+
+test("PT4: permission_command_toggles_on_and_persists", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/opt/x": "read_write" } }),
+      "utf8",
+    );
+    // Start disabled.
+    await (await import("node:fs/promises")).writeFile(
+      join(dir, "settings.json"),
+      JSON.stringify({ enabled: false }),
+      "utf8",
+    );
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    // /permission on
+    const cmd = (pi as any)._commands["permission"];
+    await cmd.handler("on", ctx);
+
+    const settingsFile = join(dir, "settings.json");
+    const raw = await readFile(settingsFile, "utf8");
+    const parsed = JSON.parse(raw);
+    assert.equal(parsed.enabled, true, "settings.json should have enabled: true");
+  });
 });
 
 // ============================================================

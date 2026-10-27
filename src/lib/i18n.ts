@@ -114,6 +114,16 @@ const en: Bundle = {
     "Sensitive system path cannot be persisted. To allow permanently, edit permission.json.",
   subtitle_network_exfil_not_persistable:
     "Network exfiltration path cannot be persisted. Every write requires confirmation.",
+  // permission-toggle (P3)
+  permission_status_enabled: "🔒 Permission guard enabled",
+  permission_status_disabled: "🔓 Permission guard disabled",
+  permission_cmd_usage:
+    "Usage: /permission [on|off] — show or toggle the permission guard. 'on' enables, 'off' disables.",
+  permission_cmd_current: "Permission guard is currently {state}.",
+  permission_cmd_toggled_on: "Permission guard enabled. Gate is now active.",
+  permission_cmd_toggled_off: "Permission guard disabled. Tool calls are no longer intercepted.",
+  permission_cmd_write_failed:
+    "Failed to save settings.json: {error}. The change applies for this session only.",
 };
 
 // -------- ZH bundle --------
@@ -207,6 +217,16 @@ const zh: Bundle = {
     "敏感系统路径不能持久化。如需长期允许，请编辑 permission.json。",
   subtitle_network_exfil_not_persistable:
     "网络外带路径不能持久化。每次写入都需确认。",
+  // permission-toggle (P3)
+  permission_status_enabled: "🔒 权限守卫已启用",
+  permission_status_disabled: "🔓 权限守卫已关闭",
+  permission_cmd_usage:
+    "用法：/permission [on|off] — 查看或切换权限守卫。'on' 启用，'off' 关闭。",
+  permission_cmd_current: "权限守卫当前为 {state}。",
+  permission_cmd_toggled_on: "权限守卫已启用。gate 现已生效。",
+  permission_cmd_toggled_off: "权限守卫已关闭。工具调用不再被拦截。",
+  permission_cmd_write_failed:
+    "保存 settings.json 失败：{error}。本次会话内仍生效。",
 };
 
 // -------- Bundle map --------
@@ -252,4 +272,4 @@ export const EN_BUNDLE: Readonly<Bundle> = en;
 export const ZH_BUNDLE: Readonly<Bundle> = zh;
 
 // Total code count (all 3 domains + UI).
-export const TOTAL_CODE_COUNT = 50;
+export const TOTAL_CODE_COUNT = 57;

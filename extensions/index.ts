@@ -45,7 +45,7 @@ import { decide, type Decision } from "../src/lib/decision.ts";
 import { t } from "../src/lib/i18n.ts";
 import type { Lang, BashReasonCode, ReasonCode, UiCode } from "../src/lib/reason-codes.ts";
 import { detectLang } from "../src/lib/lang-detect.ts";
-import { loadSettings } from "../src/lib/settings.ts";
+import { loadSettings, saveSettings } from "../src/lib/settings.ts";
 
 // -------- Config for the extension registration --------
 
@@ -76,6 +76,11 @@ interface SessionState {
   // settings.json / $LANG, in that priority order. Absent at all sources
   // falls back to "en".
   lang: Lang;
+  // permission-toggle (P3): overall gate enable/disable. Read from
+  // settings.json at session start; `false` disables the whole gate
+  // (tool_call returns undefined — pi handles calls natively). Absent →
+  // true (fail-safe). Updated by /permission command.
+  enabled: boolean;
 }
 
 // -------- Type aliases for the extension surface --------
@@ -87,6 +92,7 @@ interface PictxLike {
     select: (prompt: string, choices: string[]) => Promise<string>;
     notify: (message: string, level: "info" | "warning" | "error") => void;
     input: (prompt: string, defaultValue?: string) => Promise<string>;
+    setStatus: (key: string, text: string | undefined) => void;
   };
 }
 
@@ -146,6 +152,8 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
   // computed, lang is stable for the whole session (design.md D7).
   const settings = await loadSettings(opts.trustedDir);
   const lang = detectLang(process.env, settings);
+  // permission-toggle (P3): absent enabled → true (fail-safe).
+  const enabled = settings.enabled !== false;
 
   return {
     policy,
@@ -156,6 +164,7 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
     audit,
     configWarningEmitted: false,
     lang,
+    enabled,
   };
 }
 
@@ -479,9 +488,64 @@ export function registerPermissionGate(
     return state;
   };
 
+  // permission-toggle (P3): set the footer status marker from the current
+  // gate state. Localized via i18n. Pass undefined text to clear.
+  const updateStatus = (s: SessionState, ctx: { hasUI: boolean; ui?: PictxLike["ui"] }) => {
+    if (!ctx.hasUI || !ctx.ui?.setStatus) return;
+    const code = s.enabled ? "permission_status_enabled" : "permission_status_disabled";
+    ctx.ui.setStatus("permission-guard", t(code as UiCode, s.lang));
+  };
+
+  // permission-toggle (P3): register the /permission slash command.
+  pi.registerCommand("permission", {
+    description: "Show or toggle the permission guard (on|off)",
+    handler: async (args: string, cmdCtx: any) => {
+      const s = await ensureState(cmdCtx);
+      const arg = args.trim().toLowerCase();
+      const statusCode: UiCode = s.enabled
+        ? "permission_status_enabled"
+        : "permission_status_disabled";
+      const ui = cmdCtx.ui;
+
+      if (arg === "on" || arg === "off") {
+        const next = arg === "on";
+        s.enabled = next;
+        try {
+          const settings = await loadSettings(opts.trustedDir);
+          await saveSettings(opts.trustedDir, { ...settings, enabled: next });
+        } catch (err) {
+          ui?.notify?.(
+            t("permission_cmd_write_failed" as UiCode, s.lang, {
+              error: (err as Error).message ?? String(err),
+            }),
+            "warning",
+          );
+        }
+        updateStatus(s, cmdCtx);
+        ui?.notify?.(
+          t(
+            (next ? "permission_cmd_toggled_on" : "permission_cmd_toggled_off") as UiCode,
+            s.lang,
+          ),
+          "info",
+        );
+      } else {
+        // No arg (or invalid): show current state + usage.
+        ui?.notify?.(t("permission_cmd_usage" as UiCode, s.lang), "info");
+        ui?.notify?.(
+          t("permission_cmd_current" as UiCode, s.lang, {
+            state: t(statusCode as UiCode, s.lang),
+          }),
+          "info",
+        );
+      }
+    },
+  });
+
   pi.on("session_start", async (_e: any, ctx: PictxLike) => {
     try {
       state = await initSession(ctx, opts);
+      updateStatus(state, ctx);
       if (state.warnings.length > 0 && ctx.hasUI && ctx.ui) {
         for (const w of state.warnings) {
           ctx.ui.notify(
@@ -507,6 +571,11 @@ export function registerPermissionGate(
       // Can't decide without state - fail closed but don't crash.
       return { block: true, reason: "permission extension failed to initialize" };
     }
+
+    // permission-toggle (P3): gate disabled → no-op. Return undefined so pi
+    // handles the tool call natively (no intercept, no audit). The user
+    // explicitly disabled the gate, so this is their choice.
+    if (!s.enabled) return undefined;
 
     // Emit config warnings once.
     if (s.warnings.length > 0 && !s.configWarningEmitted && ctx.hasUI && ctx.ui) {
