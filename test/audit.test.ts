@@ -156,6 +156,36 @@ test("AL7: concurrent_audits_are_serialized_no_line_interleaving", async () => {
   });
 });
 
+test("AL9: long_bash_command_truncated_and_command_hash_preserved", async () => {
+  await withTmpFile(async (path) => {
+    const logger = createAuditLogger(path);
+    const longCmd = "cat " + "/tmp/x".repeat(100) + " 2>/dev/null";
+    logger.log({
+      event: "allow_persistent",
+      tool: "bash",
+      project: "hash1",
+      projectRoot: "/proj",
+      path: null,
+      command: longCmd,
+      region: "project_outer",
+      declaration: "unconfigured",
+      permission: "read_only",
+      toolCallId: "tc-b5",
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    const raw = await readFile(path, "utf8");
+    const record = JSON.parse(raw.trim());
+    // B5: truncated command (<= 512 chars incl. marker) with note.
+    assert.ok(record.command.length <= 512, "command should be truncated to <=512");
+    assert.match(record.command, /\u2026$/);
+    assert.match(record.note, /command truncated/);
+    // B5: commandHash should be a 64-char sha256 of the ORIGINAL command.
+    assert.match(record.commandHash, /^[0-9a-f]{64}$/);
+    const { createHash } = await import("node:crypto");
+    assert.equal(record.commandHash, createHash("sha256").update(longCmd).digest("hex"));
+  });
+});
+
 test("AL8: audit_logger_creates_log_directory_on_first_write", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-audit-"));
   try {

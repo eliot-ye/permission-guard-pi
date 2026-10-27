@@ -161,6 +161,7 @@
 - 新增 `grant_type` 字段，区分 `path` / `bash` / `rule`
 - Bash 类型日志中加入 `commandHash` 和 `reason`
 - Rule 类型日志中加入 `tool`、`pattern` 和 `action`
+- B5（audit/bash-grant 边界卫生）：当 bash 命令 > 511 字符被截断时，audit 记录额外写入 `commandHash`（原始命令的 SHA-256），让事后审计能精确匹配 `trusted.json` 里 `bashGrants[].commandHash`（bash 键按 `sha256(rawCommand)` 键控）。未截断的记录不写此字段（向后兼容）。
 
 #### Scenario: 会话内允许特定 bash 命令
 

@@ -92,6 +92,57 @@ test("PC4: jsonc_parser_strips_comments_and_trailing_commas", async () => {
   }
 });
 
+// -------- PC4b: JSONC single-quote handling --------
+
+test("PC4b: single_quote_in_comment_does_not_swallow_file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-cfg-"));
+  try {
+    const p = join(dir, "jsonc.json");
+    // B3: JSONC only supports double-quoted strings. A single-quote inside a
+    // comment ("it's a note") must NOT be treated as a string start — the
+    // comment handler consumes it first, and the real config parses fine.
+    await writeFile(
+      p,
+      `{
+      // it's a note about the config
+      "paths": {
+        "/tmp/x": "read_write",
+      },
+    }`,
+      "utf8",
+    );
+    const { raw } = await loadConfigFile(p);
+    assert.deepEqual(raw, { paths: { "/tmp/x": "read_write" } });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("PC4c: stray_single_quote_is_invalid_not_silent_corruption", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-cfg-"));
+  try {
+    const p = join(dir, "jsonc.json");
+    // B3: a stray single-quote in STRUCTURAL position is invalid JSONC. The
+    // parser must NOT treat it as a string start and silently swallow the rest
+    // (which would return raw={} with NO error). It must surface a parse error
+    // so the user knows the config is malformed.
+    await writeFile(
+      p,
+      `{
+      "paths": { "/tmp/x": "read_write" }
+      ' // misplaced quote
+      "rules": [{"tool":"bash","pattern":"git *","action":"allow"}]
+    }`,
+      "utf8",
+    );
+    const { raw, error } = await loadConfigFile(p);
+    assert.deepEqual(raw, {});
+    assert.ok(error, "expected a parse error to be surfaced");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // -------- PC5: invalid permission ignored --------
 
 test("PC5: invalid_permission_value_is_skipped_with_warning", () => {

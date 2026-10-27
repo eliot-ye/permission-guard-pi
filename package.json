@@ -27,6 +27,8 @@
   "files": [
     "extensions/index.ts",
     "src/",
+    "docs/",
+    "examples/",
     "README.md",
     "LICENSE"
   ],

@@ -21,6 +21,7 @@
 
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 import type { Authorization, GrantSource } from "./decision.ts";
 
 export type AuditEvent =
@@ -51,6 +52,11 @@ export interface AuditRecord {
   permission: "read_write" | "read_only" | null;
   toolCallId: string;
   note?: string;
+  // B5 (audit/bash-grant 边界卫生): 长 command 被截断到 511 字符后，
+  // 原始命令的 sha256 摘要——让事后审计能精确匹配 trusted.json 里的
+  // bash grant（bashKey 按 sha256(rawCommand) 键控）。可选，向后兼容；
+  // 未截断（<=512 字符）时不写此字段。
+  commandHash?: string;
   // Design D3: coarse-grained authorization provenance.
   //   "by_person" - human prompt choice (allow_once / allow_session /
   //     allow_persistent / deny / conflict_prompt).
@@ -113,7 +119,12 @@ function truncateCommand(record: AuditRecord): AuditRecord {
   const note = existingNote
     ? `${existingNote}; ${TRUNCATION_NOTE}`
     : TRUNCATION_NOTE;
-  return { ...record, command: truncated, note };
+  // B5: preserve a stable reference to the original command. The truncation
+  // loses the tail, so an auditor can no longer re-derive the grant key from
+  // the stored command alone — stamp sha256(original) so the record can be
+  // matched against trusted.json's bashGrants[].commandHash.
+  const commandHash = createHash("sha256").update(cmd).digest("hex");
+  return { ...record, command: truncated, note, commandHash };
 }
 
 export function createAuditLogger(logPath: string): AuditLogger {

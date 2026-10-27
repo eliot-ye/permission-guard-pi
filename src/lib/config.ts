@@ -89,6 +89,11 @@ const VALID_RULE_ACTIONS = new Set<RuleAction>(["allow", "deny"]);
 
 // Minimal JSONC comment stripper. Preserves strings so `//` inside a string
 // value isn't treated as a comment start.
+// B3 (平台与解析器边界卫生): JSONC strictly supports only double-quoted
+// strings. Single-quotes are NOT treated as string delimiters — a stray `'`
+// must not open a pseudo-string that silently swallows later comment markers
+// (which would corrupt the parse). It falls through to JSON.parse, which
+// surfaces the invalid-syntax error to the caller.
 function stripJsonComments(input: string): string {
   let out = "";
   let i = 0;
@@ -108,7 +113,7 @@ function stripJsonComments(input: string): string {
       continue;
     }
 
-    if (ch === '"' || ch === "'") {
+    if (ch === '"') {
       inString = ch;
       out += ch;
       i += 1;

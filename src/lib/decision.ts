@@ -343,5 +343,12 @@ export function decide(opts: {
 
 function isDefaultTmpPath(absPath: string): boolean {
   const normalized = absPath.replace(/\\/g, "/");
-  return normalized === "/tmp" || normalized.startsWith("/tmp/") || normalized === "/private/tmp" || normalized.startsWith("/private/tmp/");
+  // B4 (平台与解析器边界卫生): /var/tmp is a standard Unix temp dir and was
+  // missed before (only /tmp + /private/tmp were recognized). Prefix-match
+  // each so a sensitive file under any default-tmp dir still prompts.
+  return (
+    normalized === "/tmp" || normalized.startsWith("/tmp/") ||
+    normalized === "/private/tmp" || normalized.startsWith("/private/tmp/") ||
+    normalized === "/var/tmp" || normalized.startsWith("/var/tmp/")
+  );
 }

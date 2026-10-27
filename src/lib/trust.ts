@@ -95,9 +95,11 @@ export interface BashGrant {
   author?: GrantAuthor;
 }
 
-/** Input shape accepted by `addBashPersistentGrant`. `createdAt` is
- *  populated by the store; `author` is optional. */
-export type BashGrantInput = Omit<BashGrant, "createdAt">;
+/** Input shape accepted by `addBashPersistentGrant`. `commandHash` and
+ *  `createdAt` are populated by the store (commandHash is derived from
+ *  rawCommand, so callers must not pass a stale/fake hash). `author` is
+ *  optional. */
+export type BashGrantInput = Omit<BashGrant, "commandHash" | "createdAt">;
 
 export interface TrustStore {
   // Path-based session-level (in-memory).

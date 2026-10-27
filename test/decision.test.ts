@@ -336,7 +336,9 @@ test("AD16: default_tmp_plain_write_auto_allows", () => {
 test("default_tmp_paths_allow_write_delete_and_match_private_tmp", () => {
   const policy = makePolicy();
   for (const action of ["write", "delete"] as const) {
-    for (const absPath of ["/tmp", "/tmp/x", "/tmp/deep/nested.txt", "/private/tmp/deep/nested.txt"]) {
+    // B4: /var/tmp is also a default writable temp dir (missed before — only
+    // /tmp and /private/tmp were recognized).
+    for (const absPath of ["/tmp", "/tmp/x", "/tmp/deep/nested.txt", "/private/tmp/deep/nested.txt", "/var/tmp", "/var/tmp/x", "/var/tmp/deep/nested.txt"]) {
       const d = decideFor({
         policy,
         absPath,

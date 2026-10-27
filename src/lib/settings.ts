@@ -22,7 +22,9 @@ export interface Settings {
 
 // -------- JSONC comment stripper (duplicated from config.ts, kept local
 // to keep this module self-contained) --------
-
+// B3: JSONC strictly supports only double-quoted strings. Single-quotes are
+// NOT string delimiters — a stray `'` falls through to JSON.parse and
+// surfaces as invalid syntax instead of silently swallowing content.
 function stripJsonComments(input: string): string {
   let out = "";
   let i = 0;
@@ -40,7 +42,7 @@ function stripJsonComments(input: string): string {
       i += 1;
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    if (ch === '"') {
       inString = ch;
       out += ch;
       i += 1;

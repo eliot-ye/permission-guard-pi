@@ -265,7 +265,6 @@ test("GM15: bash_persistent_grant_survives_session_restart", async () => {
   await withTmpStore(async (store, path) => {
     await store.addBashPersistentGrant({
       projectHash: "h1",
-      commandHash: "",
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
@@ -291,7 +290,6 @@ test("GM17: bash_persistent_grant_preserves_command_hash_and_raw", async () => {
     const cmd = "cat /etc/passwd 2>/dev/null";
     await store.addBashPersistentGrant({
       projectHash: "h1",
-      commandHash: "",
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
@@ -315,14 +313,12 @@ test("GM18: bash_persistent_grant_upserts_by_command_hash", async () => {
     const cmd = "cat /etc/passwd 2>/dev/null";
     await store.addBashPersistentGrant({
       projectHash: "h1",
-      commandHash: "",
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_only",
     });
     await store.addBashPersistentGrant({
       projectHash: "h1",
-      commandHash: "",
       rawCommand: cmd,
       reason: "glob_expansion",
       permission: "read_write",
@@ -507,7 +503,6 @@ test("T-TRUST-LA-6: bash_persistent_grant_hit_returns_stored_author", async () =
   await withTmpStore(async (store) => {
     await store.addBashPersistentGrant({
       projectHash: "hash1",
-      commandHash: "unused",
       rawCommand: "cat /etc/hosts",
       reason: "glob_expansion",
       permission: "read_only",

@@ -1077,7 +1077,6 @@ export function registerPermissionGate(
         try {
           await state.trust.addBashPersistentGrant({
             projectHash: state.projectHash,
-            commandHash: "",
             rawCommand: bashCommand,
             reason: bashReason ?? "unreliable",
             permission: bashPermission,
