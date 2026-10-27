@@ -468,7 +468,6 @@ export function registerPermissionGate(
   opts: PermissionExtensionOptions,
 ): void {
   let state: SessionState | undefined;
-  const ctxRef: { ctx?: PictxLike } = {};
 
   installPromptGuardrails(pi);
 
@@ -476,7 +475,6 @@ export function registerPermissionGate(
   const ensureState = async (ctx: PictxLike): Promise<SessionState> => {
     if (!state) {
       state = await initSession(ctx, opts);
-      ctxRef.ctx = ctx;
     }
     return state;
   };
@@ -484,7 +482,6 @@ export function registerPermissionGate(
   pi.on("session_start", async (_e: any, ctx: PictxLike) => {
     try {
       state = await initSession(ctx, opts);
-      ctxRef.ctx = ctx;
       if (state.warnings.length > 0 && ctx.hasUI && ctx.ui) {
         for (const w of state.warnings) {
           ctx.ui.notify(
