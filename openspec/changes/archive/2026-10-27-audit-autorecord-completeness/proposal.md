@@ -53,3 +53,20 @@ spec（audit-log Req 1 "所有决策必须记录" + Req 8 授权来源标注）�
   2. 可靠 bash auto_allow → 命令级 audit（once per call）
   3. 项目内未配置非敏感常规（in_project_default_allowed）→ 仍不记录（例外保留）
   4. 可靠 bash hard_deny → audit 含 `authorization: "presumed"`
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。对照 proposal 的"系统工程影响评估"节。本复盘为 2026-10-27 system-audit project（18:37）a1 后补写——原归档时缺此节。）
+
+- **实际影响的分系统**：`side-effects`（audit）+ `extension-orchestration`（extensions/index.ts handleFileTool + handleBash 的 audit.log 调用点）——与预期一致
+- **实际整体性能变化**：零性能影响——与预期一致（auto_allow 审计为一次布尔判断 + 追加 JSONL 行，常数级；decision.reasonCode 已有，无新计算）
+- **实际是局部优化还是全局协调**：局部优化（补齐 audit 记录欠账）——与预期一致
+- **局部优化的实际全局影响**：新增 auto_allow 审计记录使 audit-log spec Req 1"所有决策必须记录"得到满足——无决策结果变化（仍 return undefined），仅多写日志行——与预期一致
+- **模型验证**：
+  1. **文件工具 config 声明 auto_allow → audit** ✅ 已验证——SYS-B2b（`/etc/hosts: read_only` read → `event: auto_allow` + `grant_source: config_declaration`）
+  2. **可靠 bash auto_allow → 命令级 audit** ✅ 已验证——SYS-B2c（`cat /etc/hosts` → `event: auto_allow`，tool: bash）
+  3. **例外保留（in_project_default_allowed 不记录）** ✅ 已验证——既有测试（项目内未配置常规读写无审计记录）保持 GREEN
+  4. **可靠 bash hard_deny → authorization: presumed** ✅ 已验证——SYS-B2a（`cat /etc/passwd` unread → `authorization: presumed`）
+  - **预期行为模型已验证**（4/4）
+
+- **预期之外的副作用**：无。全量 704/704（一次 AL7 偶发 flaky——已知 HEAD 基线竞态 `al4_af7_flaky_tests_existing`，非本 change 引入；重跑 704/0）。

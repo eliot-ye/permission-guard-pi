@@ -124,7 +124,7 @@
 
 - **不适用降级**：不适用（本 change 是纯组织层重构，有明确可验证的行为契约——403 个测试 + typecheck + spec 零改动）。
 
-## 实际 vs 预期（archive 复盘）
+## 实际系统工程影响 vs 预期
 
 **复盘日期**：2026-10-27
 **对照源**：本 proposal "系统工程影响评估"节 + `openspec/specs/bash-target-extraction/spec.md` baseline。

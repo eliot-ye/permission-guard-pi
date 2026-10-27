@@ -116,7 +116,7 @@ td-explore 阶段深挖后修正了 TODO 的扁平"死代码"标签——真实�
 
 - **不适用降级**：不适用（本 change 是零影响清理，3 个契约均可通过 grep 与 test 直接验证）。
 
-## 实际 vs 预期（archive 复盘）
+## 实际系统工程影响 vs 预期
 
 **复盘日期**：2026-10-27
 **对照源**：本 proposal "系统工程影响评估"节 + `openspec/specs/grant-memory/spec.md` baseline。

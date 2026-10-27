@@ -81,7 +81,7 @@
   - **遵循**：`src/lib/*.ts` 无 IO 纯函数的分层不变；`AuditRecord` 追加字段的模式与 `permission-config-rules-upgrade` 的"加宽兼容"先例一致；trusted.json 迁移通过读取时默认赋值而非磁盘重写，符合 grant-memory spec 里"缺失文件视为空 grants"的宽容哲学
   - **不偏离既有架构/风格**：无偏离点。本次不涉及新的分系统切分、不引入新模块、不改变错误处理模式
 
-## Archive Retrospective（实际 vs 预期，2026-10-23）
+## 实际系统工程影响 vs 预期
 
 对照上方"系统工程影响评估"节的五个字段，逐项复盘实际执行结果。
 

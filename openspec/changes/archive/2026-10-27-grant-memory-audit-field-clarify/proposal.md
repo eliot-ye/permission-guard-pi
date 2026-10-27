@@ -44,3 +44,18 @@ reverse-spec（2026-10-27）检出 grant-memory Req 8 两处 spec-代码漂移�
 - **Tier**：medium。
 - **Impact scope**：spec 澄清（契约对齐），无代码变化。
 - **实际影响 vs 预期**：把 spec 对齐到代码的实际安全行为（不可靠 bash 只 deny；grant_source 为权威来源标注）——消除 spec 超前于实现造成的契约漂移。
+
+## 实际系统工程影响 vs 预期
+
+（td-archive 步骤 3 强制复盘。本复盘为 2026-10-27 system-audit project（18:37）a1 后补写——原归档时缺此节。）
+
+- **实际影响的分系统**：`policy-core`（grant-memory spec 澄清）——与预期一致
+- **实际整体性能变化**：零性能影响——与预期一致（纯 spec 修正，无代码变化）
+- **实际是局部优化还是全局协调**：全局协调（把 spec 对齐到代码的实际安全行为，消除 spec 超前于实现的契约漂移）——与预期一致
+- **局部优化的实际全局影响**：明确不可靠 bash 只查 deny（安全保守设计文档化）；grant_source 为权威来源标注——消除契约漂移——与预期一致
+- **模型验证**：
+  1. **不可靠 bash 只查 deny** ✅ 已验证——spec 158 行（只查询 deny 规则）与代码 extensions/index.ts:677（deny takes precedence）一致；704/704 无回归
+  2. **grant_source 为权威** ✅ 已验证——spec 191 行（来源标注以 grant_source 为权威）与代码 audit.log 调用点（全部有 grant_source）一致
+  - **预期行为模型已验证**（2/2）
+
+- **预期之外的副作用**：无。

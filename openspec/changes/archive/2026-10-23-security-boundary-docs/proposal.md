@@ -47,7 +47,7 @@
 - **高危标记**：无高危变更点。
 - **已知 caller**：不适用——无代码变更，无 caller 受影响。
 
-## 实际 vs 预期复盘
+## 实际系统工程影响 vs 预期
 
 - **实际影响分系统**：无代码层影响——仅新增文档资产 `docs/security/permission-model.md`（239 行）。文档内容覆盖全部分系统（bash-target-extraction / sensitive-path-classification / access-decision / approval-flow / grant-memory / permission-config），但属于跨分系统的"元文档"层面，不改变任何分系统的行为契约。与预期一致。
 - **实际整体性能变化**：无行为变化。文档文件不参与运行时加载、不影响任何 caller。与预期一致。

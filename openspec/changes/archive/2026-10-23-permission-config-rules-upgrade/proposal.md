@@ -64,7 +64,7 @@
   - `src/lib/decision.ts:17`（import `MergedPolicy`，类型加宽自动兼容）—— **兼容**
   - `test/config.test.ts`、`test/decision.test.ts`、`test/sys-integration.test.ts`、`test/cross-system-boundary.mjs`（测试调用者）—— **需适配**（新增测试）
 
-## 实际 vs 预期复盘
+## 实际系统工程影响 vs 预期
 
 - **实际影响分系统**：policy-core（config.ts + decision.ts 是策略内核，tier-medium）+ extension-orchestration（集成层适配，tier-small）。跨 2 个分系统，依赖链 policy-core → extension-orchestration（单向）。与预期一致。config.ts 加宽 RawConfig + MergedPolicy + mergePolicies；decision.ts 新增 rule 检查阶段（deny → path → allow → 默认兜底）；extensions/index.ts 适配 decideTarget 参数传递 + unreliable bash 路径 deny rule 检查。
 - **实际整体性能变化**：决策引擎新增 rule 检查阶段，每次决策多一轮线性扫描（O(n)，n=rules 数量）。实测全量 573 测试通过，无性能退化。reduce 弹窗噪音——预授权命令族不再逐次弹窗。与预期一致。

@@ -150,7 +150,7 @@
 
 - **不适用降级**：不适用（本 change 有实质行为变化，四契约均需可验证测试）。
 
-## 实际 vs 预期（archive 复盘）
+## 实际系统工程影响 vs 预期
 
 **复盘日期**：2026-10-27
 **对照源**：本 proposal "系统工程影响评估"节 + `openspec/specs/{access-decision,approval-flow,grant-memory,permission-config,bash-target-extraction}/spec.md` baseline。
