@@ -15,9 +15,10 @@ import assert from "node:assert/strict";
 import { bashSubtitleForReason } from "../extensions/index.ts";
 import { t } from "../src/lib/i18n.ts";
 import { detectLang } from "../src/lib/lang-detect.ts";
+import type { ReasonCode, UiCode } from "../src/lib/reason-codes.ts";
 
 const lang = detectLang(process.env, {});
-const testT = (code: string, params?: Record<string, string>) =>
+const testT = (code: ReasonCode | UiCode, params?: Record<string, string>) =>
   t(code, lang, params);
 
 // AF-CDC-01: cd_chdir reason must produce a subtitle that names the cd

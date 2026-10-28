@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { registerPermissionGate } from "../extensions/index.ts";
 import { t } from "../src/lib/i18n.ts";
 import { detectLang } from "../src/lib/lang-detect.ts";
+import type { ReasonCode, UiCode } from "../src/lib/reason-codes.ts";
 
 // i18n-aware UI choice strings. promptUser() matches by identity of the
 // localized strings it built, so tests must return the same strings.
@@ -36,7 +37,7 @@ const UI = {
 
 // Helper: get a localized UI string by code (uses the same detected lang
 // as the UI constants above, so tests stay language-agnostic).
-const uiText = (code: string, params?: Record<string, string>) =>
+const uiText = (code: ReasonCode | UiCode, params?: Record<string, string>) =>
   t(code, detectLang(process.env, {}), params);
 
 // -------- Mocks --------
