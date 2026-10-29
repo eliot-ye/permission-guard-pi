@@ -232,3 +232,24 @@ export function normalizeBashCommand(rawCommand: string): string {
 export function bashCommandHash(rawCommand: string): string {
   return createHash("sha256").update(normalizeBashCommand(rawCommand)).digest("hex");
 }
+
+/**
+ * Whether `absPath` resolves into a default writable temporary directory.
+ * Shared by policy-core (decision.ts step 2c: /tmp/** is a built-in
+ * read_write default, so ordinary scratch writes auto-allow without a manual
+ * config entry) and bash-extract (cd-tracking: a cd landing inside a default
+ * tmp dir carries no persistent security value, so cd-chain classification
+ * may relax there).
+ *
+ * B4 (平台与解析器边界卫生): /var/tmp is a standard Unix temp dir and was
+ * missed before (only /tmp + /private/tmp were recognized). Prefix-match
+ * each so a sensitive file under any default-tmp dir still prompts.
+ */
+export function isDefaultTmpPath(absPath: string): boolean {
+  const normalized = absPath.replace(/\\/g, "/");
+  return (
+    normalized === "/tmp" || normalized.startsWith("/tmp/") ||
+    normalized === "/private/tmp" || normalized.startsWith("/private/tmp/") ||
+    normalized === "/var/tmp" || normalized.startsWith("/var/tmp/")
+  );
+}

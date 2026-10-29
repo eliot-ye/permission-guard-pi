@@ -11,7 +11,7 @@
 // Exit: 0 on all-pass, 1 on any failure.
 //
 
-import { extractBashTargets } from "../src/lib/bash-extract.ts";
+import { extractBashTargets } from "../src/lib/bash-extract/index.ts";
 import { decide } from "../src/lib/decision.ts";
 import { findSensitiveMatch } from "../src/lib/sensitive.ts";
 import { mergePolicies } from "../src/lib/config.ts";

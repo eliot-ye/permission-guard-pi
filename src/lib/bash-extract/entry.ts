@@ -6,7 +6,8 @@ import { expandSafeVariables, extractRedirects, findUnresolvedVariable, splitCom
 import type { ExtractAction, ExtractResult } from "./parse.ts";
 import { scanControlFlow, scanFindWriteFlags } from "./control-flow.ts";
 import { scanUnreliable } from "./scan.ts";
-import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir } from "./shell-forwarder.ts";
+import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir, shouldTrackCdCwd } from "./shell-forwarder.ts";
+import { toAbsolutePath } from "../path-utils.ts";
 import { GIT_BLOB_OK_SUBCOMMANDS, NPM_RUN_OK_SCRIPTS, SILENT_ALLOW_ALL, SILENT_COMMANDS, isAnyUnreliableCommand, isSilentCommand, isSilentGo, isSilentNpx, isSilentTsc, looksLikeGitBlobToken, looksLikeRepoRelativePath } from "./silent.ts";
 import { COMMAND_TABLE } from "./extractors.ts";
 
@@ -261,6 +262,12 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
 
   // 5. For each command fragment, split into pipeline stages and process each.
   const targets: Array<{ action: ExtractAction; path: string }> = [];
+  // cd 跟踪豁免（D2c）：当命令为纯 `&&` 链 + 绝对 cd 目标时，维护模拟 cwd，
+  // 初始为 projectRoot，每遇到一个 cd 片段（目标绝对）则更新 resolveBase 为
+  // 该 cd 目标，后续片段的相对路径按 resolveBase 解析（真实算出 cd 后的落点）。
+  // 仅 D2a 成立时跟踪；D2b（全绝对下游）路径与 cwd 无关，无需模拟。
+  const trackCd = shouldTrackCdCwd(rawCommand);
+  let resolveBase = projectRoot;
   for (const cmd of commands) {
     const stages = splitPipelines(cmd);
 
@@ -286,13 +293,32 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
       }
     }
 
+    // cd 跟踪：本片段是 cd 片段（首 token basename 为 cd 且目标绝对）时，
+    // 更新 resolveBase 为该 cd 目标。cd 片段自身是 cwd 变更者，不参与路径
+    // 解析，故其 target 提取不影响结果（cd 是内建，无文件访问）。
+    if (trackCd) {
+      const trimmed = cmd.trim();
+      const tks = tokenize(trimmed);
+      if (tks.length > 0) {
+        const firstBase = tks[0].split("/").pop()!;
+        if (firstBase === "cd" && tks.length > 1 && tks[1]) {
+          const target = tks[1];
+          // 仅当 cd 目标为显式绝对路径时更新（D2a 条件 2 已保证，这里
+          // 复核以防 analyzeCd 与 trackCd 分离）。
+          if (target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target)) {
+            resolveBase = toAbsolutePath(target, projectRoot);
+          }
+        }
+      }
+    }
+
     // Extract targets from each stage.
     for (const stage of stages) {
       const trimmed = stage.trim();
       if (!trimmed) continue;
 
       // Redirects.
-      extractRedirects(trimmed, targets, projectRoot);
+      extractRedirects(trimmed, targets, resolveBase);
 
       // Command-specific extractor or SILENT_COMMANDS.
       const tokens = tokenize(trimmed);
@@ -301,7 +327,7 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
       // COMMAND_TABLE takes precedence over SILENT_COMMANDS.
       const extractor = COMMAND_TABLE[cmdName];
       if (extractor) {
-        extractor(tokens, targets, projectRoot);
+        extractor(tokens, targets, resolveBase);
       } else if (isSilentCommand(cmdName, tokens.slice(1))) {
         // Silent: 0 target, no unreliable flag.
       }

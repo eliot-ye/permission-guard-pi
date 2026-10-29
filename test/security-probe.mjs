@@ -11,7 +11,7 @@
 // Exit code: 0 on all-pass, 1 on any failure.
 //
 
-import { extractBashTargets } from "../src/lib/bash-extract.ts";
+import { extractBashTargets } from "../src/lib/bash-extract/index.ts";
 
 const ROOT = "/Users/eliot/my/proj";
 
@@ -110,7 +110,11 @@ const PAYLOADS = [
   // intent missed. Any compound command with a `cd` fragment is flagged
   // cd_chdir.
   ["L3_cd_etc_then_rm_rf_dot", "cd /etc && rm -rf .", { reliable: false, reason: "cd_chdir" }],
-  ["L3_cd_etc_then_ls", "cd /etc && ls", { reliable: false, reason: "cd_chdir" }],
+  // cd 跟踪豁免（bash-extract-glob-cd-boundary-refine）：`cd /etc && ls` 是纯
+  // `&&` 链 + 绝对 cd 目标 + 无路径引用（`ls` 0 target），D2a 豁免成立 →
+  // reliable:true。这是 cd 跟踪豁免的预期行为变化（cd_chdir → reliable），
+  // 非意外回归——真实行为是 cd 到 /etc 后 ls 当前目录，无静态文件访问目标。
+  ["L3_cd_etc_then_ls", "cd /etc && ls", { reliable: true, hasWrite: null }],
   ["L3_cd_src_then_cat_pipe_sort", "cd src && cat a.txt | sort", { reliable: false, reason: "cd_chdir" }],
   ["L3_echo_semicolon_cd_then_rm", "echo hi; cd /tmp && rm -rf .", { reliable: false, reason: "cd_chdir" }],
   ["L3_cd_dotdot_then_ls", "cd .. && ls", { reliable: false, reason: "cd_chdir" }],

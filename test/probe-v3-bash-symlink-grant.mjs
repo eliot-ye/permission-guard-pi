@@ -14,7 +14,7 @@ import { mkdtemp, rm, writeFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerPermissionGate } from "../extensions/index.ts";
-import { extractBashTargets } from "../src/lib/bash-extract.ts";
+import { extractBashTargets } from "../src/lib/bash-extract/index.ts";
 
 function createMockPi({ projectRoot, uiChoice }) {
   const ctx = {

@@ -3,13 +3,14 @@
 
 import { splitCommands, tokenize } from "./parse.ts";
 import { isReadOnlyWithArgs } from "./readonly.ts";
+import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
 import { SHELL_WRAPPER_NAMES, skipWrapperTokens } from "./shell-forwarder.ts";
 
 export const SILENT_COMMANDS: Record<string, Set<string>> = {
-  git: new Set([
-    "status", "log", "diff", "branch", "tag", "remote", "config",
-    "rev-parse", "rev-list", "shortlog", "blame", "show", "ls-files",
-  ]),
+  // git 只读子命令单一事实源：GIT_READONLY_SUBCOMMANDS（readonly.ts）。
+  // 与 shell-forwarder.ts 的 cd 链 git 写子命令判断（D2a 条件 11）共享——
+  // git 子命令不在该集合即视为写子命令，两处一致。
+  git: new Set(GIT_READONLY_SUBCOMMANDS),
   npm: new Set(["test", "lint", "audit"]),
   npx: new Set(),          // flag-only; `npx <pkg>` is unreliable
   yarn: new Set(["test", "lint", "audit"]),

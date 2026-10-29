@@ -18,6 +18,10 @@ export const READ_ONLY_COMMANDS = new Set([
   // so it goes through `isReadOnlyWithArgs` for a per-argument check.
 ]);
 
+// git 只读子命令（裸子命令名）：从 git-cmds.ts 单一事实源导入。
+// 重新导出供本文件消费方（isReadOnlyWithArgs 的 git_* 折叠判定）使用。
+export { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
+
 // Flags that make `find` perform a write/delete operation rather than
 // only filtering results. Any of these in a `find` invocation's arguments
 // makes the command non-read-only.
@@ -172,6 +176,16 @@ export function isBoundedGlobSafe(cmd: string, projectRoot: string): boolean {
         if (tokenHasGlob) {
           // Condition 2: command must be read-only (arg-aware).
           if (!isReadOnlyWithArgs(stageCmd, stageArgs)) return false;
+          // 情形 B（空 prefix 只读 glob 豁免）：glob 前缀为空（glob 在 token
+          // 起始，如 `ls *.md`、`ls *`）时，命令只读（上文 isReadOnlyWithArgs
+          // 已通过）即视为 cwd-relative 并 bounded 于 projectRoot——cwd ==
+          // projectRoot 假设下，空 prefix glob 展开结果完全位于 projectRoot 内，
+          // 且命令只读无写副作用风险。空前缀意味着 token 首个字符就是 glob
+          // 元字符本身，不可能以 `/`、`~`、Windows 盘符开头，故无需重复绝对
+          // 标志检查；写命令（`rm *.log`、`tar xzf *.tgz`）因 isReadOnlyWithArgs
+          // 未通过而在此前已拒绝。与既有 `isForLoopIterationGlobExempt` 的
+          // 空 prefix 豁免同构（窄条件豁免）。
+          if (tokenGlobPrefix === "") return true;
           // Condition 1: prefix inside projectRoot.
           if (!isBoundedPrefix(tokenGlobPrefix, projectRoot)) return false;
         }

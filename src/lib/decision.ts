@@ -17,6 +17,7 @@
 import type { MergedPolicy, MatchedEntry, Permission } from "./config.ts";
 import type { SensitiveRule } from "./sensitive.ts";
 import { isDevSocketOrFd } from "./bash-extract/index.ts";
+import { isDefaultTmpPath } from "./path-utils.ts";
 
 export type Action = "read" | "write" | "delete";
 export type Region = "project_inner" | "project_outer";
@@ -339,16 +340,4 @@ export function decide(opts: {
     reason: `Outside-project non-sensitive ${action}; approval required`,
     reasonCode: "outside_write_needs_approval",
   };
-}
-
-function isDefaultTmpPath(absPath: string): boolean {
-  const normalized = absPath.replace(/\\/g, "/");
-  // B4 (平台与解析器边界卫生): /var/tmp is a standard Unix temp dir and was
-  // missed before (only /tmp + /private/tmp were recognized). Prefix-match
-  // each so a sensitive file under any default-tmp dir still prompts.
-  return (
-    normalized === "/tmp" || normalized.startsWith("/tmp/") ||
-    normalized === "/private/tmp" || normalized.startsWith("/private/tmp/") ||
-    normalized === "/var/tmp" || normalized.startsWith("/var/tmp/")
-  );
 }

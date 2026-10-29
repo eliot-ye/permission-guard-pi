@@ -1013,10 +1013,14 @@ test("BMG43: glob_with_dotdot_in_prefix_is_unbounded", () => {
 });
 
 test("BMG44: bare_glob_alone_is_unbounded", () => {
-  // `ls *` — glob at token start has no prefix, so unbounded.
+  // 边界①情形 B（bash-extract-glob-cd-boundary-refine）：`ls *` — glob 在 token
+  // 起始无前缀，但命令 `ls` 只读（条件 3a），空 prefix glob 不以绝对路径标志
+  // 开头，cwd == projectRoot 假设下视为 bounded 于 projectRoot → 放行。
+  // 原实现判 glob_expansion；本 change 后变 reliable（预期行为变化，非回归）。
+  // looksLikePath("*")=false，故 readExtract 不提取 target（与 `ls archive/*/`
+  // → [] 惯例一致），但命令整体 reliable 放行。
   const r = extractBashTargets("ls *", "/proj");
-  assert.equal(r.reliable, false);
-  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
 });
 
 test("BMG45: pipeline_stage_command_is_read_only", () => {
@@ -3321,4 +3325,899 @@ test("substitution_btp_audit_97_still_triggers_prompt: audit_97_pattern_still_pr
   if (!r.reliable) {
     assert.equal(r.reason, "command_substitution");
   }
+});
+
+// ============================================================
+// bash-extract-glob-cd-boundary-refine：边界①（空 prefix 只读 glob 豁免）
+// ============================================================
+//
+// 账本场景（proposal scenario→test 覆盖账本）：
+//   BMG-RO-empty-prefix-ls-glob-autoallow      只读命令 + 空 prefix glob 自动放行
+//   BMG-RO-bare-empty-prefix-ls-autoallow      只读命令 + 裸空 prefix glob 自动放行
+//   BMG-RO-empty-prefix-tar-glob-reject        写命令 + 空 prefix glob 仍触发
+//   BMG-RO-abs-prefix-glob-reject              只读命令 + 绝对路径前缀 glob 仍触发
+//   BMG-RO-tilde-prefix-glob-reject            只读命令 + ~ 前缀 glob 仍触发
+
+test("BMG-RO-empty-prefix-ls-glob-autoallow: ls_md_glob_autoallow", () => {
+  // 情形 B：`ls *.md` — ls 只读（条件 3a），空 prefix glob 不以绝对路径标志开头。
+  // cwd == projectRoot 假设下展开于 projectRoot 内，bounded 放行。
+  const r = extractBashTargets("ls *.md", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/proj/*.md"),
+    `expected read target /proj/*.md, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BMG-RO-bare-empty-prefix-ls-autoallow: ls_bare_glob_autoallow", () => {
+  // 情形 B：`ls *` — 裸空 prefix glob。looksLikePath("*")=false，故 readExtract 不提取
+  // target（与既有 `ls archive/*/` → [] 惯例一致），但命令整体 reliable 放行。
+  const r = extractBashTargets("ls *", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-RO-empty-prefix-tar-glob-reject: tar_glob_reject", () => {
+  // 情形 B 反例：写命令 `tar` 不满足条件 3 只读判定，空 prefix 放宽不适用。
+  const r = extractBashTargets("tar xzf pi-ui-extension-*.tgz", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BMG-RO-abs-prefix-glob-reject: ls_abs_prefix_glob_reject", () => {
+  // 情形 B 反例：`ls /etc/*.conf` — glob 以 `/` 开头（绝对路径前缀），情形 B 不适用。
+  const r = extractBashTargets("ls /etc/*.conf", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+test("BMG-RO-tilde-prefix-glob-reject: ls_tilde_prefix_glob_reject", () => {
+  // 情形 B 反例：`ls ~/*.md` — glob 以 `~` 开头（home 展开），情形 B 不适用。
+  const r = extractBashTargets("ls ~/*.md", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "glob_expansion");
+});
+
+// ============================================================
+// bash-extract-glob-cd-boundary-refine：边界②（cd 跟踪豁免 + 全绝对下游豁免）
+// ============================================================
+//
+// 账本场景（proposal scenario→test 覆盖账本）：
+//   BMG-CD-all-abs-downstream-exempt      cd 后全绝对下游豁免
+//   BMG-CD-all-abs-redirect-exempt        cd 后全绝对重定向豁免
+//   BMG-CD-rel-redirect-cd-track          cd 后相对重定向 cd 跟踪豁免
+//   BMG-CD-rel-downstream-cd-track        cd 后相对路径下游 cd 跟踪豁免
+//   BMG-CD-mixed-abs-rel-cd-track         cd 后混合绝对+相对路径 cd 跟踪豁免
+//   BMG-CD-glob-rel-prefix-reject         cd 后 glob 相对前缀仍判不可靠（条件5排除）
+//   BMG-CD-no-explicit-ref-reject         cd 后无显式路径引用仍判不可靠（防空转）
+//   BMG-CD-silent-no-ref-reject           cd 后 SILENT 无显式路径引用仍判不可靠（防空转）
+//   BMG-CD-dev-tcp-redirect-reject        cd 后网络套接字重定向仍判不可靠（网络外传防回归）
+//   BMG-CD-rel-cd-target-reject           cd 相对目标仍判不可靠（条件2排除）
+//   BMG-CD-tilde-cd-target-reject         cd 目标含 ~ 仍判不可靠（条件2排除）
+//   BMG-CD-var-cd-target-reject           cd 目标含变量仍判不可靠（条件2排除）
+//   BMG-CD-dash-reject                    cd - 仍判不可靠（条件2排除）
+//   BMG-CD-pipeline-reject                cd 后管道仍判不可靠（条件3排除）
+//   BMG-CD-cwd-anchor-rm-reject           cd 后 cwd 锚点 rm 仍判不可靠（条件4排除）
+//   BMG-CD-cwd-anchor-redirect-reject     cd 后 cwd 锚点重定向仍判不可靠（条件4排除）
+//   BMG-CD-dev-fd-cd-track-reject         cd 后数字 fd 重定向仍判不可靠（条件6排除）
+//   BMG-CD-unextractable-rm-reject        cd 后不可提取相对参数 rm 仍判不可靠（条件7排除）
+//   BMG-CD-unextractable-mkdir-reject     cd 后不可提取相对参数 mkdir 仍判不可靠（条件7排除）
+//   BMG-CD-pwd-var-reject                 cd 后 $PWD 仍判不可靠（条件8排除）
+
+test("BMG-CD-all-abs-downstream-exempt: cd_all_abs_downstream_exempt", () => {
+  // D2b：cd 后下游 `grep` 位置参数 `/tmp/x/file` 显式绝对，豁免适用。
+  const r = extractBashTargets("cd /tmp/x && grep -n pattern /tmp/x/file", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/file"),
+    `expected read target /tmp/x/file, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BMG-CD-all-abs-redirect-exempt: cd_all_abs_redirect_exempt", () => {
+  // D2b：cd 后重定向目标 `/tmp/x/out` 显式绝对，豁免适用。
+  const r = extractBashTargets("cd /tmp/x && echo hi > /tmp/x/out", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "write" && t.path === "/tmp/x/out"),
+    `expected write target /tmp/x/out, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BMG-CD-rel-redirect-cd-track: cd_rel_redirect_cd_track", () => {
+  // D2a：纯 && 链 + 绝对 cd 目标 + 相对重定向目标 `rel.txt`。
+  // 跟踪 cwd 解析真实落点 `/tmp/x/rel.txt`，而非 `<proj>/rel.txt`。
+  const r = extractBashTargets("cd /tmp/x && echo hi > rel.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "write" && t.path === "/tmp/x/rel.txt"),
+    `expected write target /tmp/x/rel.txt, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BMG-CD-rel-downstream-cd-track: cd_rel_downstream_cd_track", () => {
+  // D2a：纯 && 链 + 绝对 cd 目标 + 相对路径下游 `file.txt`。
+  // 跟踪 cwd 解析真实落点 `/tmp/x/file.txt`。
+  const r = extractBashTargets("cd /tmp/x && grep -n pattern file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/file.txt"),
+    `expected read target /tmp/x/file.txt, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BMG-CD-mixed-abs-rel-cd-track: cd_mixed_abs_rel_cd_track", () => {
+  // D2a：混合绝对+相对路径。`/tmp/x/a` 按绝对解析，`b.txt` 按跟踪 cwd 解析。
+  const r = extractBashTargets("cd /tmp/x && cat /tmp/x/a && cat b.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  const paths = r.targets.map((t) => t.path);
+  assert.ok(paths.includes("/tmp/x/a"), `expected /tmp/x/a, got ${JSON.stringify(paths)}`);
+  assert.ok(paths.includes("/tmp/x/b.txt"), `expected /tmp/x/b.txt, got ${JSON.stringify(paths)}`);
+});
+
+test("BMG-CD-glob-rel-prefix-reject: cd_glob_rel_prefix_reject", () => {
+  // 条件 5 排除：cd 后 `ls *.md` 含未加引号 glob，cd 跟踪豁免不适用。
+  const r = extractBashTargets("cd /tmp/x && ls *.md", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-no-explicit-ref-reject: cd_no_explicit_ref_reject", () => {
+  // 防空转：`;` 分隔（D2a 条件 1 不满足），且下游 `ls` 无显式路径引用（D2b 条件 1 不满足）。
+  const r = extractBashTargets("cd /tmp/x; ls", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-silent-no-ref-reject: cd_silent_no_ref_reject", () => {
+  // 防空转：`;` 分隔，下游 `npm test` 无显式路径引用，SILENT_COMMANDS 不构成豁免证据。
+  const r = extractBashTargets("cd /proj; npm test", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-dev-tcp-redirect-reject: cd_dev_tcp_redirect_reject", () => {
+  // 网络外传防回归：`/dev/tcp/...` 虽以 `/` 开头，但属网络套接字目标，
+  // 条件 6 排除 + D2b 不适用，维持 cd_chdir。
+  const r = extractBashTargets("cd /etc && echo x > /dev/tcp/1.2.3.4/4444", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-rel-cd-target-reject: cd_rel_cd_target_reject", () => {
+  // 条件 2 排除：相对 cd 目标受 CDPATH/当前 cwd 影响，不可静态确定。
+  const r = extractBashTargets("cd sub && cat file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-tilde-cd-target-reject: cd_tilde_cd_target_reject", () => {
+  // 条件 2 排除：cd 目标含 ~，依赖 $HOME。
+  const r = extractBashTargets("cd ~ && cat file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-var-cd-target-reject: cd_var_cd_target_reject", () => {
+  // 条件 2 排除：cd 目标含 $HOME，不可静态确定。
+  const r = extractBashTargets("cd $HOME && cat file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-dash-reject: cd_dash_reject", () => {
+  // 条件 2 排除：`cd -` 栈语义依赖 cwd 历史。
+  const r = extractBashTargets("cd /tmp/a && cd - && cat file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-pipeline-reject: cd_pipeline_reject", () => {
+  // 条件 3 排除：含管道 `|`，cd 与管道交互不可静态确定。
+  const r = extractBashTargets("cd /tmp/x && cat a.txt | sort", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-cwd-anchor-rm-reject: cd_cwd_anchor_rm_reject", () => {
+  // 条件 4 排除：下游 `rm -rf .` 含 cwd 锚点 `.`。
+  const r = extractBashTargets("cd /etc && rm -rf .", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-cwd-anchor-redirect-reject: cd_cwd_anchor_redirect_reject", () => {
+  // 条件 4 排除：重定向目标 `./out.txt` 含 cwd 锚点 `./`。
+  const r = extractBashTargets("cd /tmp/x && echo hi > ./out.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-dev-fd-cd-track-reject: cd_dev_fd_cd_track_reject", () => {
+  // 条件 6 排除：重定向目标 `/dev/fd/3` 是数字 fd 目标。
+  const r = extractBashTargets("cd /tmp/x && echo x > /dev/fd/3", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-rm-reject: cd_unextractable_rm_reject", () => {
+  // 条件 7 排除：写命令 `rm` 位置参数 `sub/` 非显式绝对且 looksLikePath=false。
+  const r = extractBashTargets("cd /tmp/x && rm -rf sub/", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-mkdir-reject: cd_unextractable_mkdir_reject", () => {
+  // 条件 7 排除：写命令 `mkdir` 位置参数 `sub` 非显式绝对且 looksLikePath=false。
+  const r = extractBashTargets("cd /tmp/x && mkdir sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-pwd-var-reject: cd_pwd_var_reject", () => {
+  // 条件 8 排除：下游含 $PWD，不随模拟 cwd 漂移。
+  const r = extractBashTargets("cd /tmp/x && cat $PWD/foo", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+// ============================================================
+// bash-extract-glob-cd-boundary-refine：D2a 安全洞修复（人工 review 6.3 判出）
+// ============================================================
+//
+// 洞：cd 跟踪豁免（D2a）下，cd 后「不可提取的非绝对路径引用」——无扩展名
+// 裸词重定向目标（`echo x > sub`）、read-only 命令的无扩展名裸词位置参数
+// （`cat sub`、`ls sub`、`grep pattern sub`）——looksLikePath=false 不被提取为
+// target，D2a 条件 4-7 全部看不到，从原实现 cd_chdir 弹窗退化为
+// reliable:true + 0 target 静默放行。真实落点是 cd 后的 cwd（如 /etc/sub），
+// 静默放行写/读系统敏感区。修复：D2a 对「重定向目标 + write/delete 位置
+// 参数 + read-only 位置参数」的不可提取非绝对词一律排除（维持 cd_chdir）。
+// 这些用例是安全回归锁定，修复后须判 cd_chdir。
+
+test("BMG-CD-unextractable-redirect-reject: cd_echo_gt_sub_reject", () => {
+  // 洞 1：cd 后相对重定向目标 `sub`（无扩展名裸词，looksLikePath=false）。
+  // 修复后 D2a 排除 → 维持 cd_chdir（不再静默放行写 /etc/sub）。
+  const r = extractBashTargets("cd /etc && echo x > sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-redirect-slash-reject: cd_echo_gt_sub_slash_reject", () => {
+  // 洞 2：cd 后相对重定向目标 `sub/`（尾部斜杠，looksLikePath=false）。
+  const r = extractBashTargets("cd /etc && echo x > sub/", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-read-cat-reject: cd_cat_sub_reject", () => {
+  // 洞 3：cd 后 read-only `cat sub`（裸词，looksLikePath=false）。
+  const r = extractBashTargets("cd /etc && cat sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-read-ls-reject: cd_ls_sub_reject", () => {
+  // 洞 4：cd 后 read-only `ls -la sub`（裸词）。
+  const r = extractBashTargets("cd /etc && ls -la sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-read-grep-reject: cd_grep_sub_reject", () => {
+  // 洞 5：cd 后 read-only `grep pattern sub`（pattern 是模式词，sub 是裸词）。
+  const r = extractBashTargets("cd /tmp/x && grep pattern sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-read-wc-reject: cd_wc_sub_reject", () => {
+  // 洞 6：cd 后 read-only `wc sub`（裸词）。
+  const r = extractBashTargets("cd /etc && wc sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+// ============================================================
+// F1（6.3 收尾 review subagent 判出 critical）：curl/wget 写目标裸词漏检
+// ============================================================
+//
+// 洞：curl/wget 不在 FILE_ARG_COMMANDS，其 `-o`/`-O`/`--output`/
+// `--output-document` 写目标值不被 collectStagePathRefs 收集，D2a 条件 9
+// 看不到（URL 位置参数亦不收集）。cd 链下 `curl -o sub url` 的 `sub` 是
+// cwd-relative 写目标，但 D2a 豁免成立 → reliable:true + 0 target 静默放行
+// 写 /etc/sub（与原始洞 echo x > sub 同后果同类别）。修复后须判 cd_chdir。
+
+test("BMG-CD-unextractable-curl-oreject: cd_curl_o_sub_reject", () => {
+  // F1 洞 1：curl -o 写目标裸词 `sub`（looksLikePath=false）。
+  const r = extractBashTargets("cd /etc && curl -o sub https://x.com/a", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-wget-O-reject: cd_wget_O_sub_reject", () => {
+  // F1 洞 2：wget -O 写目标裸词 `sub`。
+  const r = extractBashTargets("cd /etc && wget -O sub https://x.com/a", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-curl-O-noarg-reject: cd_curl_O_noarg_reject", () => {
+  // F1 洞 3：curl -O 无参——写目标为 URL basename，未知但 cwd-relative。
+  // 修复后亦须判 cd_chdir（不可静默放行写 /etc/<urlbasename>）。
+  const r = extractBashTargets("cd /etc && curl -O https://x.com/a", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-curl-abs-write-exempt: cd_curl_abs_write_exempt", () => {
+  // 对照（防过度修复）：curl -o 绝对写目标仍应豁免（D2b 全绝对下游）。
+  const r = extractBashTargets("cd /etc && curl -o /tmp/a.bin https://x.com/a", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "write" && t.path === "/tmp/a.bin"),
+    `expected write target /tmp/a.bin, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+// ============================================================
+// F2（6.3 收尾 review subagent 判出 critical，复验后升级）：无 extractor
+// 命令（sort/tar/cmp/diff/uniq/sha256sum/gzip/xz）的裸词位置参数漏检
+// ============================================================
+//
+// 洞：这些命令不在 COMMAND_TABLE（无 extractor），其位置参数不被
+// collectStagePathRefs 收集（原 FILE_ARG_COMMANDS 只覆盖有 extractor 命令）。
+// cd 链下 `cd /etc && sort sub` 的 `sub` 是 cwd-relative 裸词，但 D2a 豁免
+// 成立 → reliable:true + 0 target 静默放行读/写 /etc/sub（与 6.3/F1 修的洞
+// 同后果同类别）。修复：FILE_ARG_COMMANDS 补齐这些命令 + tar 操作标志跳过
+// + D2a 条件 10（无 extractor 命令 + 非绝对位置参数 → d2a 排除）。修复后
+// 裸词与相对路径引用一律判 cd_chdir；绝对路径引用仍走 D2b 豁免（防过度
+// 修复对照）。这些用例是安全回归锁定，修复后须判 cd_chdir。
+
+test("BMG-CD-unextractable-sort-reject: cd_sort_sub_reject", () => {
+  // 洞 1：sort 裸词位置参数（looksLikePath=false）。
+  const r = extractBashTargets("cd /etc && sort sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-tar-reject: cd_tar_xf_sub_reject", () => {
+  // 洞 2：tar xf 裸词归档（解压写 cwd 下 /etc/sub）。
+  const r = extractBashTargets("cd /etc && tar xf sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-cmp-reject: cd_cmp_sub_reject", () => {
+  // 洞 3：cmp 裸词位置参数。
+  const r = extractBashTargets("cd /etc && cmp sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-uniq-reject: cd_uniq_sub_reject", () => {
+  // 洞 4：uniq 裸词位置参数。
+  const r = extractBashTargets("cd /etc && uniq sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-sha256sum-reject: cd_sha256sum_sub_reject", () => {
+  // 洞 5：sha256sum 裸词位置参数。
+  const r = extractBashTargets("cd /etc && sha256sum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-diff-reject: cd_diff_sub_reject", () => {
+  // 洞 6：diff 两个裸词位置参数。
+  const r = extractBashTargets("cd /etc && diff a b", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-gzip-reject: cd_gzip_sub_reject", () => {
+  // 洞 7：gzip 裸词位置参数。
+  const r = extractBashTargets("cd /etc && gzip sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-unextractable-xz-reject: cd_xz_sub_reject", () => {
+  // 洞 8：xz 裸词位置参数。
+  const r = extractBashTargets("cd /etc && xz sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-no-extractor-rel-path-reject: cd_sort_data_rel_reject", () => {
+  // 洞 9：无 extractor 命令 + 可提取相对路径（looksLikePath=true）——条件 9
+  // 不触发，但 sort 无 extractor 无法消费 resolveBase 提取落点，治本落空 →
+  // 0 target 静默放行读 /etc/data.txt。条件 10 排除 → cd_chdir。
+  const r = extractBashTargets("cd /etc && sort data.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-no-extractor-abs-exempt: cd_sort_abs_exempt", () => {
+  // 对照（防过度修复）：无 extractor 命令 + 绝对路径位置参数仍应豁免（D2b
+  // 全绝对下游，绝对路径 cwd 无关）。`sort /tmp/data.txt` 应 reliable:true。
+  const r = extractBashTargets("cd /etc && sort /tmp/data.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-tar-opflag-abs-exempt: cd_tar_xf_abs_exempt", () => {
+  // 对照（防过度修复）：tar 操作标志 `xf` 不是路径引用，跳过它后绝对归档
+  // `/tmp/a.tar` 是唯一位置参数 → D2b 豁免成立（reliable:true）。
+  const r = extractBashTargets("cd /etc && tar xf /tmp/a.tar", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+// ============================================================
+// F3（用户拍板落地）：git 写子命令在 cd 链下的安全边界
+// ============================================================
+//
+// 用户（总体设计部）拍板：git 只读子命令（log/show/diff/status 等，pathspec
+// 是 git 内部管理的查询条件，非 shell cwd 文件引用）在 cd 链下静默放行正确
+// ——D2a 条件 11 不排除它们；git 写子命令（rm/add/commit/checkout/clean/mv
+// 等，修改工作树文件）在 cd 链下若 cd 最终落点不在默认 tmp 目录（/tmp、
+// /private/tmp、/var/tmp），则保守排除豁免（回退 cd_chdir——真实删除/覆盖
+// 的文件依赖漂移后 cwd，但本解析器不把 git 路径参数提取为 target，豁免会
+// 0 target 静默放行）；cd 落点在默认 tmp 目录时静默放行（tmp 无持久安全
+// 价值，与 decision.ts step 2c 的 tmp_default_allowed 语义一致）。
+
+test("BMG-CD-git-write-nontmp-rm-reject: cd_git_rm_nontmp_reject", () => {
+  // git 写子命令 rm + 非 tmp 落点 → cd_chdir（用户拍板：保守排除）。
+  const r = extractBashTargets("cd /etc && git rm file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-git-write-nontmp-checkout-reject: cd_git_checkout_nontmp_reject", () => {
+  // git 写子命令 checkout + 非 tmp 落点 → cd_chdir。
+  const r = extractBashTargets("cd /etc && git checkout file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-git-write-nontmp-add-reject: cd_git_add_nontmp_reject", () => {
+  // git 写子命令 add + 非 tmp 落点 → cd_chdir。
+  const r = extractBashTargets("cd /etc && git add file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-git-write-nontmp-mv-reject: cd_git_mv_nontmp_reject", () => {
+  // git 写子命令 mv + 非 tmp 落点 → cd_chdir。
+  const r = extractBashTargets("cd /etc && git mv a.txt b.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-git-write-tmp-rm-allow: cd_git_rm_tmp_allow", () => {
+  // git 写子命令 rm + tmp 落点（/tmp）→ 静默放行（用户拍板：tmp 无持久安全价值）。
+  const r = extractBashTargets("cd /tmp/x && git rm file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-git-write-tmp-checkout-allow: cd_git_checkout_tmp_allow", () => {
+  // git 写子命令 checkout + tmp 落点（/tmp）→ 静默放行。
+  const r = extractBashTargets("cd /tmp/x && git checkout file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-git-write-vartmp-rm-allow: cd_git_rm_vartmp_allow", () => {
+  // git 写子命令 rm + /var/tmp 落点 → 静默放行（/var/tmp 也是默认 tmp，B4）。
+  const r = extractBashTargets("cd /var/tmp/x && git rm file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-git-read-nontmp-log-allow: cd_git_log_nontmp_allow", () => {
+  // git 只读子命令 log + 非 tmp 落点 → 静默放行（用户拍板：pathspec 非 cwd 文件引用）。
+  const r = extractBashTargets("cd /etc && git log file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-git-read-nontmp-status-allow: cd_git_status_nontmp_allow", () => {
+  // git 只读子命令 status + 非 tmp 落点 → 静默放行。
+  const r = extractBashTargets("cd /etc && git status", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+// ============================================================
+// F2 补漏（6.3 收尾 review subagent 判 MUST_FIX_CRITICAL 后穷尽）：
+// coreutils 文件命令类在 cd 链下的安全边界
+// ============================================================
+//
+// subagent 复核判出 F2 修复不完整：无 extractor 文件命令不在 FILE_ARG_COMMANDS
+//（md5sum/sha512sum/sha1sum/b2sum/cksum/comm/join/paste/nl/cut 等）仍
+// `cd /etc && md5sum sub` → reliable:true + 0 target 静默放行读 /etc/sub，
+// 与 F2 critical 同类别同后果。穷尽枚举后，这些命令的裸词位置参数被
+// collectStagePathRefs 收集，条件 10 排除豁免（维持 cd_chdir）；绝对路径
+// 位置参数仍走 D2b 豁免（防过度修复对照）。
+
+test("BMG-CD-coreutils-md5sum-bare-reject: cd_md5sum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && md5sum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-sha512sum-bare-reject: cd_sha512sum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && sha512sum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-b2sum-bare-reject: cd_b2sum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && b2sum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-cksum-bare-reject: cd_cksum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && cksum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-comm-bare-reject: cd_comm_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && comm a b", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-join-bare-reject: cd_join_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && join a b", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-paste-bare-reject: cd_paste_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && paste sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-nl-bare-reject: cd_nl_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && nl sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-cut-bare-reject: cd_cut_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && cut -d: -f1 sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-tac-bare-reject: cd_tac_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && tac sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-sdiff-bare-reject: cd_sdiff_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && sdiff a b", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-gunzip-bare-reject: cd_gunzip_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && gunzip sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-zcat-bare-reject: cd_zcat_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && zcat sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-chgrp-bare-reject: cd_chgrp_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && chgrp grp sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils-md5sum-abs-exempt: cd_md5sum_abs_exempt", () => {
+  // 防过度修复对照：绝对路径位置参数仍走 D2b 豁免（不依赖 cwd）。
+  const r = extractBashTargets("cd /etc && md5sum /tmp/a.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-coreutils-paste-abs-exempt: cd_paste_abs_exempt", () => {
+  // 防过度修复对照：绝对路径位置参数仍走 D2b 豁免。
+  const r = extractBashTargets("cd /etc && paste /tmp/a.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+// ============================================================
+// F2 补漏第二波（f2b-recheck 复核中断前提出的残留类 + 全量扫描证实）：
+// 目录列举/文本编码/路径元数据/创建删除类在 cd 链下的安全边界
+// ============================================================
+//
+// f2b-recheck 中断前要求验证 dir/vdir/shuf/base64/expand/fmt 等是否缺席
+// 全部命令注册表（残留窗口检查的关键）。实测证实 20 个同类别命令仍
+// reliable:true + 0 target 静默放行（含写类：unlink sub 静默删除
+// /etc/sub、mkfifo sub 静默创建特殊文件）。穷尽枚举后其裸词位置参数被
+// collectStagePathRefs 收集，条件 10 排除豁免（维持 cd_chdir）；绝对路径
+// 位置参数仍走 D2b 豁免（防过度修复对照）。id/uname/seq/basename 等
+// （位置参数为用户名/数字/字符串操作）与 echo 文本命令不纳入——其位置
+// 参数非 cwd 文件引用，实测确认保持豁免。
+
+test("BMG-CD-coreutils2-dir-bare-reject: cd_dir_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && dir sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-vdir-bare-reject: cd_vdir_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && vdir sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-shuf-bare-reject: cd_shuf_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && shuf sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-base64-bare-reject: cd_base64_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && base64 sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-basenc-bare-reject: cd_basenc_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && basenc sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-expand-bare-reject: cd_expand_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && expand sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-unexpand-bare-reject: cd_unexpand_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && unexpand sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-fmt-bare-reject: cd_fmt_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && fmt sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-fold-bare-reject: cd_fold_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && fold sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-ptx-bare-reject: cd_ptx_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && ptx sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-tsort-bare-reject: cd_tsort_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && tsort sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-pathchk-bare-reject: cd_pathchk_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && pathchk sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-realpath-bare-reject: cd_realpath_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && realpath sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-readlink-bare-reject: cd_readlink_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && readlink sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-pinky-file-flag-reject: cd_pinky_file_flag_reject", () => {
+  // pinky 的 -f flag 读文件（-f 被 flag 跳过，sub 作为文件位置参数收集）。
+  const r = extractBashTargets("cd /etc && pinky -f sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-mktemp-template-reject: cd_mktemp_template_reject", () => {
+  // mktemp 模板落 cwd：真实创建 /etc/subXXXXXX（写类）。
+  const r = extractBashTargets("cd /etc && mktemp subXXXXXX", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-link-target-reject: cd_link_target_reject", () => {
+  // link 源绝对 + 目标裸词：真实在 /etc 创建硬链接 b（写类）。
+  const r = extractBashTargets("cd /etc && link /tmp/a.txt b", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-unlink-bare-reject: cd_unlink_bare_reject", () => {
+  // unlink 裸词：真实删除 /etc/sub（写类，删除操作静默放行是最高危形态）。
+  const r = extractBashTargets("cd /etc && unlink sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-mknod-bare-reject: cd_mknod_bare_reject", () => {
+  // mknod 在 cwd 创建设备特殊文件（写类）。
+  const r = extractBashTargets("cd /etc && mknod sub c 1 3", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-mkfifo-bare-reject: cd_mkfifo_bare_reject", () => {
+  // mkfifo 在 cwd 创建 FIFO 特殊文件（写类）。
+  const r = extractBashTargets("cd /etc && mkfifo sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils2-dir-abs-exempt: cd_dir_abs_exempt", () => {
+  // 防过度修复对照：绝对路径位置参数仍走 D2b 豁免（不依赖 cwd）。
+  const r = extractBashTargets("cd /etc && dir /tmp/a.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BMG-CD-coreutils2-unlink-abs-exempt: cd_unlink_abs_exempt", () => {
+  // 防过度修复对照：写类命令绝对路径位置参数仍走 D2b 豁免（cwd 无关）。
+  const r = extractBashTargets("cd /etc && unlink /tmp/a.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+// ============================================================
+// F2 补漏第三波（final-closeout-review 判 APPROVED_WITH_CHANGES issue 1）：
+// 原地覆写/分割/压缩归档/校验和/转换/补丁类在 cd 链下的安全边界
+// ============================================================
+//
+// final-closeout-review 实证 FILE_ARG_COMMANDS 仍有同族缺席（xz/gzip/bzip2/
+// zcat 已入而 lzma/lz4/zstd/bzcat/xzcat 缺席；diff 已入而 diff3 缺席），实测
+// 19 命令仍 reliable:true + 0 target 静默放行（shred 原地覆写、split/csplit
+// 向 cwd 写分片为最高危写形态）。补入后条件 10 排除豁免（维持 cd_chdir）。
+
+test("BMG-CD-coreutils3-shred-bare-reject: cd_shred_bare_reject", () => {
+  // shred 原地覆写：真实覆写 /etc/sub（最高危写形态）。
+  const r = extractBashTargets("cd /etc && shred sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-split-bare-reject: cd_split_bare_reject", () => {
+  // split 向 cwd 写分片 xaa/xab…。
+  const r = extractBashTargets("cd /etc && split sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-csplit-bare-reject: cd_csplit_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && csplit sub 1", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-bzcat-bare-reject: cd_bzcat_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && bzcat sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-xzcat-bare-reject: cd_xzcat_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && xzcat sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-lzma-bare-reject: cd_lzma_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && lzma sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-lz4-bare-reject: cd_lz4_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && lz4 sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-zstd-bare-reject: cd_zstd_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && zstd sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-unzip-bare-reject: cd_unzip_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && unzip sub.zip", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-zip-bare-reject: cd_zip_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && zip a.zip sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-shasum-bare-reject: cd_shasum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && shasum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-sha3sum-bare-reject: cd_sha3sum_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && sha3sum sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-diff3-bare-reject: cd_diff3_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && diff3 a b c", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-dos2unix-bare-reject: cd_dos2unix_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && dos2unix sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-rev-bare-reject: cd_rev_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && rev sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-column-bare-reject: cd_column_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && column sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-pr-bare-reject: cd_pr_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && pr sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-patch-positional-reject: cd_patch_positional_reject", () => {
+  // patch 位置参数形态：`patch sub.diff` 读补丁文件。
+  const r = extractBashTargets("cd /etc && patch sub.diff", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-patch-stdin-redirect-reject: cd_patch_stdin_redirect_reject", () => {
+  // patch stdin 重定向形态：`patch -p0 < p.txt` 的 p.txt 是 cwd 相对读。
+  const r = extractBashTargets("cd /etc && patch -p0 < p.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-bzip3-bare-reject: cd_bzip3_bare_reject", () => {
+  const r = extractBashTargets("cd /etc && bzip3 sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-coreutils3-shred-abs-exempt: cd_shred_abs_exempt", () => {
+  // 防过度修复对照：绝对路径位置参数仍走 D2b 豁免（cwd 无关）。
+  const r = extractBashTargets("cd /etc && shred /tmp/a.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
 });

@@ -1,7 +1,8 @@
 # permission-toggle Specification
 
 ## Purpose
-TBD - created by archiving change permission-enable-toggle. Update Purpose after archive.
+
+permission-toggle capability 定义 permission gate 的总开关：`settings.json` 的可选 `enabled` 字段控制整个 permission gate 是否生效——关闭时 `tool_call` 对 read/write/edit/bash 直接返回 undefined 交由 pi 原生处理（不拦截、不审计），缺省视为 true 以保证旧配置向后兼容与 fail-safe 默认行为。
 
 ## Requirements
 

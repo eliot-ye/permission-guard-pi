@@ -1,8 +1,11 @@
 // Bash extraction: shell forwarders (bash -c), wrappers, cd-chdir, forwarders (xargs).
 // Pure module — no IO / no side effects.
 
-import { splitCommands, splitPipelines, tokenize } from "./parse.ts";
-import { isReadOnlyWithArgs } from "./readonly.ts";
+import { splitCommands, splitPipelines, tokenize, looksLikePath } from "./parse.ts";
+import { isReadOnlyWithArgs, isDevSocketOrFd } from "./readonly.ts";
+import { COMMAND_TABLE } from "./extractors.ts";
+import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
+import { isDefaultTmpPath } from "../path-utils.ts";
 
 export const FORWARDING_COMMANDS = new Set(["xargs", "parallel", "pforeach"]);
 
@@ -367,18 +370,586 @@ export function isShellForwarderTokenStream(tokens: string[]): boolean {
 //
 // Returns `"cd_chdir"` when the guard fires, otherwise `undefined`.
 
-export function scanCdChdir(cmd: string): string | undefined {
+// -------- cd chdir guard (bash-hardening-round-2 L3, refined) --------
+
+/**
+ * Determine whether a token (after quote removal) is an explicit absolute
+ * path: starts with `/`, or is a Windows drive path `C:\` / `C:/`.
+ * `~`, `$VAR`, relative prefixes (`./`, `../`) are NOT absolute.
+ */
+function isExplicitAbsolutePath(token: string): boolean {
+  if (!token) return false;
+  if (token.startsWith("/")) return true;
+  return /^[A-Za-z]:[\\/]/.test(token);
+}
+
+/**
+ * Determine whether a token is a network-socket / numeric-fd redirect target.
+ * These are I/O targets whose semantics are unrelated to cwd-based path
+ * resolution, so they never count as exemption evidence for a cd-chdir
+ * exemption. Mirrors `isDevSocketOrFd` (absolute-path form).
+ */
+function isNetOrFdTarget(token: string): boolean {
+  return isDevSocketOrFd(token);
+}
+
+/**
+ * Check whether a downstream path reference is "statically visible": the
+ * token is either an explicit absolute path, OR `looksLikePath` recognises it
+ * as a path-bearing token (relative path / extension word / `./` / `../`).
+ * Non-path bare words (`sub`, `sub/`, `file` without extension) are NOT
+ * visible — they fall through to conservative cd_chdir.
+ */
+function isVisiblePathRef(token: string): boolean {
+  if (isExplicitAbsolutePath(token)) return true;
+  return looksLikePath(token);
+}
+
+/**
+ * Check whether a token contains any unquoted glob metacharacter outside
+ * quotes (unescaped `*`, `?`, `[`). Quote-aware: glob inside single/double
+ * quotes is literal and does not count.
+ */
+function containsUnquotedGlob(token: string): boolean {
+  let quote: null | "'" | '"' = null;
+  let escaped = false;
+  for (const ch of token) {
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (quote === "'") { if (ch === "'") quote = null; continue; }
+    if (quote === '"') { if (ch === '"') quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === "*" || ch === "?" || ch === "[") return true;
+  }
+  return false;
+}
+
+/**
+ * Check whether a token contains a cwd-anchor path reference (`.`, `..`,
+ * `./`, `../`, or a relative path segment that is exactly `.` / `..`).
+ * Such references anchor to the *current* cwd, which cd-tracking changes.
+ */
+function containsCwdAnchor(token: string): boolean {
+  // Exact `.` / `..` tokens.
+  if (token === "." || token === "..") return true;
+  // Starts with `./` or `../`.
+  if (token.startsWith("./") || token.startsWith("../")) return true;
+  // Relative path with an interior `.` / `..` segment (e.g. `a/../b`).
+  const segments = token.split("/");
+  return segments.includes(".") || segments.includes("..");
+}
+
+/**
+ * 命令类型分类（D2a 条件 9 用）：位置参数代表文件访问路径的命令。
+ * 这些命令的非 flag 位置参数是路径/文件引用，其真实落点依赖 cwd；
+ * 不可提取的裸词（looksLikePath=false）必须在 D2a 下排除（维持 cd_chdir）。
+ * 文本参数命令（echo/printf/true/false/pwd/cd/test/[/env 等）不在此列——
+ * 其位置参数是文本，文件访问只可能来自重定向（由 redirect 扫描处理）。
+ */
+const FILE_ARG_COMMANDS = new Set([
+  "cat", "head", "tail", "wc", "ls", "tree", "stat", "du", "df", "file",
+  "less", "more", "rm", "mkdir", "rmdir", "mv", "cp", "touch", "ln",
+  "chmod", "chown", "truncate", "dd", "tee", "install",
+  // grep：位置参数是 PATTERN + 文件引用（PATTERN 由 grepPatternSkipIdx 跳过）。
+  "grep",
+  // find / git_*：位置参数可能含路径，保守纳入（flag-value / revision 裸词
+  // 会保守排除——宁可弹窗不静默）。
+  "find", "git_log", "git_show", "git_diff", "git_status", "git_ls-files",
+  "git_branch", "git_tag", "git_remote", "git_config",
+  // 无 extractor 但位置参数是文件路径的命令（6.3 收尾 review 补漏，F2）。
+  // 它们在 COMMAND_TABLE 中无 extractor（非 cd 场景 0 target），但位置参数
+  // 是真实文件引用——cd 链下裸词（looksLikePath=false）真实落点依赖漂移后
+  // cwd，若不被 collectStagePathRefs 收集，D2a 条件 9 看不到 → 豁免成立 +
+  // 0 target 静默放行（如 `cd /etc && sort sub` 静默读 /etc/sub、`cd /etc &&
+  // tar xf sub` 静默解压写 /etc/sub，与 6.3/F1 修的洞同类别）。加入后其
+  // 裸词位置参数（含 tar 操作标志 xf/cf、sort -o 的裸词值）被收集，条件 9
+  // 排除豁免（维持 cd_chdir），绝不静默放行。排序/压缩/比较命令的合法
+  // 豁免（绝对路径位置参数）仍走 D2b，不受影响。
+  "sort", "tar", "cmp", "diff", "uniq", "sha256sum", "gzip", "xz",
+  // F2 补漏（6.3 收尾 review subagent 判 MUST_FIX_CRITICAL 后穷尽）：coreutils
+  // 校验/比较/文本命令类——位置参数是文件引用（md5sum sub 静默读 /etc/sub）。
+  // 同类别命令（无 extractor + 位置参数=文件）一律加入，绝不静默放行；绝对
+  // 路径位置参数仍走 D2b 豁免（防过度修复对照）。
+  // 校验和类：md5sum/sha1sum/sha224sum/sha384sum/sha512sum/b2sum/cksum/sum。
+  "md5sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "b2sum",
+  "cksum", "sum",
+  // 文本行处理类（读文件）：tac/nl/od/comm/join/paste/cut/sdiff。
+  "tac", "nl", "od", "comm", "join", "paste", "cut", "sdiff",
+  // 解压/转换类（读文件）：gunzip/unxz/bzip2/bunzip2/zcat。
+  "gunzip", "unxz", "bzip2", "bunzip2", "zcat",
+  // 元数据类（读文件属性）：chgrp。
+  "chgrp",
+  // F2 补漏第二波（f2b-recheck 复核中断前提出的残留类 + 全量扫描证实，
+  // 与 F2 critical 同类别同后果）。目录列举类（读，ls 变体）：
+  "dir", "vdir",
+  // 文本/编码处理类（读文件）：shuf/base64/basenc/expand/unexpand/fmt/fold/
+  // ptx/tsort。
+  "shuf", "base64", "basenc", "expand", "unexpand", "fmt", "fold",
+  "ptx", "tsort",
+  // 路径元数据类（读，lstat/path 解析）：pathchk/realpath/readlink；
+  // pinky 的 -f flag 读文件。
+  "pathchk", "realpath", "readlink", "pinky",
+  // 创建/删除类（写工作树）：mktemp（模板落 cwd）/link/unlink（硬链接与
+  // 删除）/mknod/mkfifo（创建特殊文件）。
+  "mktemp", "link", "unlink", "mknod", "mkfifo",
+  // F2 补漏第三波（final-closeout-review 判 APPROVED_WITH_CHANGES issue 1，
+  // 实测 19 命令仍静默放行）。原地覆写/分割类（写）：shred（原地覆写——
+  // 最高危写形态）/split（向 cwd 写 xaa/xab…）/csplit（写 xx00…）。
+  "shred", "split", "csplit",
+  // 压缩/解压/归档类：bzcat/xzcat（读）、lzma/lz4/zstd/bzip3（压缩写）、
+  // unzip/zip（归档解压/压缩写）。
+  "bzcat", "xzcat", "lzma", "lz4", "zstd", "bzip3", "unzip", "zip",
+  // 校验和/比较类：shasum/sha3sum（与 *sum 族同类）、diff3（与 diff 同类）。
+  "shasum", "sha3sum", "diff3",
+  // 转换/格式化/补丁类：dos2unix（原地转换写）、rev/column/pr（读文件）、
+  // patch（`patch file.diff` 位置参数与 stdin 重定向形态）。
+  "dos2unix", "rev", "column", "pr", "patch",
+  // 注意：id/uname/tty/logname/groups/seq/factor/numfmt/basename/dirname
+  // 等不在此列——其位置参数是用户名/数字/字符串操作，非 cwd 文件引用。
+  // pinky 虽默认按用户名查询（与 id 同类），但其 -f flag 读文件，保守纳入
+  // （`cd x && pinky <user>` 会误伤弹窗——宁可弹窗不静默，有意接受该噪音）。
+  // env/nice/nohup/timeout/setsid/watch/stdbuf 等命令执行器（位置参数是
+  // PATH 解析的命令名，非 cwd 文件）属另一类，见 tasks.md 已知边界记录。
+  // 本清单是「已知文件参数命令」的持续清点，非形式化穷尽——清单外同类
+  // 命令的残留为已知边界（tasks.md 记录），spec 以排除判据为准。
+]);
+
+/**
+ * curl/wget 的输出写目标 flag 表（F1 修复）。
+ *
+ * 这些命令的 URL 位置参数是网络路径而非文件引用（不收集），但输出写目标
+ * flag 值（`-o`/`--output`/`-O`/`--output-document`）是真实文件写目标，
+ * 必须收集供 D2a 条件 9 的裸词排除（否则 `cd /etc && curl -o sub url` 的
+ * `sub` 不可提取、豁免成立 → reliable:true + 0 target 静默放行写 /etc/sub）。
+ *
+ * `withArg`：flag 后一个 token 即写目标路径；`noArg`：无参 flag（curl -O）
+ * 写目标为 URL basename，未知但必然相对当前 cwd —— 用哨兵表达。
+ */
+const OUTPUT_FLAG_COMMANDS: Record<string, { withArg: string[]; noArg: string[] }> = {
+  curl: { withArg: ["-o", "--output"], noArg: ["-O"] },
+  wget: { withArg: ["-O", "--output-document"], noArg: [] },
+};
+
+// 哨兵：非绝对、非网络/fd、looksLikePath=false 的裸词，供条件 9 排除。
+// 真实 shell 参数不可能含 NUL，故不会与用户输入撞名。
+const OUTPUT_NOARG_SENTINEL = "\0output-noarg";
+
+/**
+ * grep 的 PATTERN 参数不是路径引用：跳过第一个非 flag 位置参数（或
+ * -e/-f 指定的 pattern 值），只把其余位置参数当作文件引用。
+ */
+function grepPatternSkipIdx(tokens: string[]): Set<number> {
+  const skip = new Set<number>();
+  let i = 1;
+  let sawNonOpt = false;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t === "-e" || t === "-f") { if (i + 1 < tokens.length) skip.add(i + 1); i += 2; continue; }
+    if ((t.startsWith("-e") && t.length > 2) || (t.startsWith("-f") && t.length > 2)) { i += 1; continue; }
+    if (t.startsWith("-")) { i += 1; continue; }
+    if (!sawNonOpt) { skip.add(i); sawNonOpt = true; }
+    i += 1;
+  }
+  return skip;
+}
+
+/**
+ * Collect the path-bearing tokens from a pipeline stage: positional args
+ * (excluding flags and grep pattern) plus redirect targets.
+ *
+ * Returns the list of "path reference" tokens in the stage. Redirect targets
+ * are extracted by scanning the raw stage string for redirect operators
+ * (`>` / `>>` / `2>` / `2>>` / `<`), mirroring `extractRedirects` semantics.
+ *
+ * 注意：位置参数收集**不做** `looksLikePath` 过滤——不可提取的裸词
+ * （`sub`、`sub/`、`src`）也返回，供 D2a 条件 9 排除（它们在 cd 链下真实
+ * 落点依赖 cwd 但无法提取为 target，豁免会静默放行）。仅文件参数命令
+ * （FILE_ARG_COMMANDS）收集位置参数；文本参数命令（echo 等）的位置参数
+ * 是文本，不收集，其文件访问只来自重定向。
+ */
+function collectStagePathRefs(stage: string): string[] {
+  const refs: string[] = [];
+  const tokens = tokenize(stage);
+  if (tokens.length > 0) {
+    const cmdBase = tokens[0].split("/").pop()!;
+    if (FILE_ARG_COMMANDS.has(cmdBase)) {
+      const grepSkip = cmdBase === "grep" ? grepPatternSkipIdx(tokens) : new Set<number>();
+      for (let i = 1; i < tokens.length; i++) {
+        if (grepSkip.has(i)) continue;
+        const t = tokens[i];
+        if (t.startsWith("-")) continue;
+        // tar：第一个位置参数（i===1，不带 `-`）若是纯字母操作标志（xf/cf/tf/
+        // xzf/czf 等），它不是路径引用——跳过。flag 形式（`tar -xvf ...`）下
+        // 操作标志以 `-` 开头已被上方跳过，第一个非 flag 位置参数是真实文件
+        // （不跳过，如 `tar -xvf sub` 的 `sub` 必须收集供条件 9 排除）。仅当
+        // i===1 时跳过，避免误跳过后续真实文件（`tar xf sub` 中 `sub` 是归档
+        // 文件，必须收集）。`tar xf /tmp/a.tar` 的 `xf` 跳过、`/tmp/a.tar` 收集
+        // → D2b 豁免成立（绝对归档），不误伤。
+        if (cmdBase === "tar" && i === 1 && /^[a-zA-Z]+$/.test(t) && !isExplicitAbsolutePath(t) && !looksLikePath(t)) {
+          continue;
+        }
+        refs.push(t);
+      }
+    } else if (OUTPUT_FLAG_COMMANDS[cmdBase]) {
+      // F1：curl/wget 的输出写目标 flag 值是真实文件写目标，必须收集供
+      // D2a 条件 9 的裸词排除（URL 位置参数是网络路径而非文件引用，不收集）。
+      // 无参 flag（curl -O）写目标为 URL basename，未知但必然相对当前 cwd，
+      // 用哨兵表达（非绝对、非网络/fd、looksLikePath=false → 条件 9 排除）。
+      const spec = OUTPUT_FLAG_COMMANDS[cmdBase];
+      for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (spec.withArg.includes(t)) {
+          if (i + 1 < tokens.length) {
+            const v = tokens[i + 1];
+            if (!v.startsWith("-")) refs.push(v);
+          }
+          i += 1;
+          continue;
+        }
+        // 内联 `--output=<path>`（curl）/ `--output-document=<path>`（wget）。
+        const m =
+          cmdBase === "curl" ? t.match(/^--output=(.+)$/) : t.match(/^--output-document=(.+)$/);
+        if (m && m[1] && !m[1].startsWith("-")) {
+          refs.push(m[1]);
+          continue;
+        }
+        if (spec.noArg.includes(t)) {
+          refs.push(OUTPUT_NOARG_SENTINEL);
+          continue;
+        }
+      }
+    }
+  }
+  // Redirect targets: scan raw string for operators.
+  let i = 0;
+  while (i < stage.length) {
+    const ch = stage[i];
+    if (ch === "<") {
+      if (stage[i + 1] === "<") { i += 2; continue; } // heredoc
+      i += 1;
+      while (i < stage.length && /\s/.test(stage[i])) i += 1;
+      let target = "";
+      while (i < stage.length && !/[\s;|>&<]/.test(stage[i])) { target += stage[i]; i += 1; }
+      if (target) refs.push(target);
+      continue;
+    }
+    if (ch === "2" && stage[i + 1] === ">" && stage[i + 2] === "&") { i += 3; while (i < stage.length && /[0-9]/.test(stage[i])) i += 1; continue; }
+    if (ch === "2" && stage[i + 1] === ">" && stage[i + 2] === ">") { i += 3; while (i < stage.length && /\s/.test(stage[i])) i += 1; let target = ""; while (i < stage.length && !/[\s;|>&<]/.test(stage[i])) { target += stage[i]; i += 1; } if (target) refs.push(target); continue; }
+    if (ch === "2" && stage[i + 1] === ">") { i += 2; while (i < stage.length && /\s/.test(stage[i])) i += 1; let target = ""; while (i < stage.length && !/[\s;|>&<]/.test(stage[i])) { target += stage[i]; i += 1; } if (target) refs.push(target); continue; }
+    if (ch === ">" && stage[i + 1] === ">") { i += 2; while (i < stage.length && /\s/.test(stage[i])) i += 1; let target = ""; while (i < stage.length && !/[\s;|>&<]/.test(stage[i])) { target += stage[i]; i += 1; } if (target) refs.push(target); continue; }
+    if (ch === ">" && stage[i + 1] === "&") { i += 2; continue; }
+    if (ch === ">") { i += 1; while (i < stage.length && /\s/.test(stage[i])) i += 1; let target = ""; while (i < stage.length && !/[\s;|>&<]/.test(stage[i])) { target += stage[i]; i += 1; } if (target) refs.push(target); continue; }
+    i += 1;
+  }
+  return refs;
+}
+
+/**
+ * Check whether a downstream stage has a path-bearing positional argument or
+ * redirect target that is NOT an explicit absolute path (i.e. is cwd-relative
+ * or otherwise cwd-dependent). Used to reject the all-absolute-downstream
+ * exemption when any relative reference is present.
+ */
+function hasCwdRelativePathRef(stage: string): boolean {
+  const refs = collectStagePathRefs(stage);
+  for (const ref of refs) {
+    // Network/fd targets never count as exemption evidence.
+    if (isNetOrFdTarget(ref)) continue;
+    if (!isExplicitAbsolutePath(ref)) return true;
+  }
+  return false;
+}
+
+/**
+ * Check whether a downstream stage contains an explicit absolute path
+ * reference (positional or redirect target) that is NOT a network/fd target.
+ */
+function hasExplicitAbsPathRef(stage: string): boolean {
+  const refs = collectStagePathRefs(stage);
+  for (const ref of refs) {
+    if (isNetOrFdTarget(ref)) continue;
+    if (isExplicitAbsolutePath(ref)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a downstream fragment's command is a git WRITE subcommand.
+ *
+ * git subcommand classification 单一事实源：GIT_READONLY_SUBCOMMANDS
+ *（git-cmds.ts，与 SILENT_COMMANDS.git 一致）。git 子命令不在该集合即视为
+ * 写子命令（rm/add/commit/checkout/clean/mv/reset/revert/stash 等），与
+ * entry.ts 4b 的 `SILENT_COMMANDS[cmdName].has(t)` 语义一致——写子命令
+ * 修改工作树文件（删除/覆盖），不是只读 pathspec 查询。
+ *
+ * git 写子命令的路径参数是「git 内部管理的 pathspec」（git 访问 .git 对象
+ * 数据库 + 工作树，路径参数不直接作为 shell cwd 相对文件引用被本解析器
+ * 读取），但真实落点（rm 删除的文件、checkout 覆盖的文件）仍依赖 cd 后
+ * cwd。用户（总体设计部）拍板：git 写子命令在 cd 链下，cd 落点非默认
+ * tmp 目录时保守排除（cd_chdir），cd 落点在默认 tmp 目录时静默放行
+ * （tmp 无持久安全价值）。
+ */
+function isGitWriteSubcommand(stage: string): boolean {
+  const tokens = tokenize(stage.trim());
+  if (tokens.length === 0) return false;
+  const base = tokens[0].split("/").pop()!;
+  if (base !== "git") return false;
+  // git 允许子命令前有 flag（如 `--no-pager`），与 getStageCommandName 一致：
+  // 扫第一个非 flag token 作为子命令。
+  for (let i = 1; i < tokens.length; i++) {
+    if (tokens[i].startsWith("-")) continue;
+    return !GIT_READONLY_SUBCOMMANDS.has(tokens[i]);
+  }
+  return false; // 只有 git（无子命令）→ 非写子命令，不额外排除
+}
+
+/**
+ * Analyze a compound command for `cd` usage and the two exemption paths.
+ *
+ * Returns `{ hasCd, d2a, d2b }`:
+ *   - `hasCd`: any fragment's leading token (basename) is `cd`.
+ *   - `d2a` (cd-tracking exemption): pure `&&` chain + all cd targets explicit
+ *     absolute + no pipeline + no cwd-anchor refs + no unquoted glob + no
+ *     network/fd redirect targets + no unextractable non-absolute write/delete
+ *     positional + no `$PWD`/`$OLDPWD`. When true, downstream relative paths
+ *     may be resolved against a tracked cwd.
+ *   - `d2b` (all-absolute-downstream exemption): every downstream fragment's
+ *     path refs are all explicit absolute (and at least one exists, and no
+ *     network/fd target, and no relative ref).
+ */
+export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boolean } {
   const fragments = splitCommands(cmd);
-  if (fragments.length < 2) return undefined;
+  if (fragments.length < 2) return { hasCd: false, d2a: false, d2b: false };
+
+  const cdFragments: Array<{ frag: string; cdTarget: string }> = [];
   for (const frag of fragments) {
     const trimmed = frag.trim();
     if (!trimmed) continue;
     const tokens = tokenize(trimmed);
     if (tokens.length === 0) continue;
     const firstBase = tokens[0].split("/").pop()!;
-    if (firstBase === "cd") return "cd_chdir";
+    if (firstBase === "cd") {
+      const cdTarget = tokens[1] ?? "";
+      cdFragments.push({ frag: trimmed, cdTarget });
+    }
   }
-  return undefined;
+  if (cdFragments.length === 0) return { hasCd: false, d2a: false, d2b: false };
+
+  const hasCd = true;
+  let d2a = true;
+  let d2b = true;
+
+  // --- D2a: cd-tracking exemption ---
+  // Condition 1: pure `&&` chain (all separators between fragments are `&&`).
+  {
+    const pureAnd = (() => {
+      let i = 0;
+      let expectAnd = false;
+      while (i < cmd.length) {
+        const ch = cmd[i];
+        if (ch === "\\") { i += 2; continue; }
+        if (ch === "'") { i += 1; while (i < cmd.length && cmd[i] !== "'") i += 1; i += 1; continue; }
+        if (ch === '"') { i += 1; while (i < cmd.length && cmd[i] !== '"') i += 1; i += 1; continue; }
+        if (cmd.startsWith("&&", i)) { i += 2; expectAnd = false; continue; }
+        if (cmd.startsWith("||", i)) { return false; }
+        if (ch === ";" || ch === "&" || ch === "\n") return false;
+        i += 1;
+      }
+      return !expectAnd;
+    })();
+    if (!pureAnd) d2a = false;
+  }
+
+  // Condition 2: all cd targets explicit absolute (no `~`, `$`, glob, relative).
+  if (d2a) {
+    for (const cd of cdFragments) {
+      const t = cd.cdTarget;
+      if (!t || !isExplicitAbsolutePath(t)) { d2a = false; break; }
+      if (t.includes("~") || t.includes("$")) { d2a = false; break; }
+      if (containsUnquotedGlob(t)) { d2a = false; break; }
+      if (t.startsWith("./") || t.startsWith("../")) { d2a = false; break; }
+    }
+  }
+
+  // Condition 3: no pipeline in any fragment (each fragment is 1 stage).
+  if (d2a) {
+    for (const frag of fragments) {
+      if (splitPipelines(frag).length !== 1) { d2a = false; break; }
+    }
+  }
+
+  // Determine downstream fragments (those AFTER a cd fragment).
+  const downstreamFragments: string[] = [];
+  {
+    let cdSeen = false;
+    for (const frag of fragments) {
+      const trimmed = frag.trim();
+      if (!trimmed) continue;
+      const tokens = tokenize(trimmed);
+      if (tokens.length === 0) continue;
+      const firstBase = tokens[0].split("/").pop()!;
+      if (firstBase === "cd") { cdSeen = true; continue; }
+      if (cdSeen) downstreamFragments.push(trimmed);
+    }
+  }
+
+  // Condition 4 (D2a): no cwd-anchor path refs in downstream fragments.
+  // Condition 5 (D2a): no unquoted glob in downstream fragments.
+  // Condition 6 (D2a): no network/fd redirect targets in downstream fragments.
+  // Condition 8 (D2a): no `$PWD` / `$OLDPWD` in downstream fragments.
+  // Condition 9 (D2a): no unextractable non-absolute path reference. A bare
+  // word (e.g. `sub`, `sub/`, `src`) that `looksLikePath` rejects is NOT
+  // extracted as a target, yet its real location depends on the tracked cwd
+  // (`cd /etc && echo x > sub` really writes `/etc/sub`). If the exemption
+  // applied, the command would be `reliable:true` with 0 targets — silently
+  // allowing the access. So any non-absolute, non-network/fd ref that is not
+  // `looksLikePath`-extractable rejects the exemption (falls back to cd_chdir).
+  // This covers both positional args (`cat sub`) and redirect targets
+  // (`echo x > sub`), fixing the critical gap where condition 7 only checked
+  // write/delete positional args.
+  if (d2a) {
+    for (const frag of downstreamFragments) {
+      const refs = collectStagePathRefs(frag);
+      for (const ref of refs) {
+        if (containsCwdAnchor(ref)) { d2a = false; break; }
+        if (containsUnquotedGlob(ref)) { d2a = false; break; }
+        if (isNetOrFdTarget(ref)) { d2a = false; break; }
+        // 条件 9：非绝对 + 非网络/fd + 不可提取裸词 → 排除。
+        if (!isExplicitAbsolutePath(ref) && !isNetOrFdTarget(ref) && !looksLikePath(ref)) { d2a = false; break; }
+      }
+      if (frag.includes("$PWD") || frag.includes("$OLDPWD")) { d2a = false; break; }
+      // Also scan whole raw fragment for unquoted glob (not just path refs).
+      if (containsUnquotedGlob(frag)) { d2a = false; break; }
+      // Also scan for any cwd anchor in raw fragment text (e.g. `rm -rf .`).
+      if (containsCwdAnchor(frag)) { d2a = false; break; }
+    }
+  }
+
+  // Condition 7 (D2a): write/delete commands must have all positionals either
+  // absolute or looksLikePath-extractable. Reject unextractable relative args.
+  if (d2a) {
+    const WRITE_DELETE = new Set(["rm", "mkdir", "rmdir", "mv", "cp", "touch", "ln", "chmod", "chown", "truncate", "dd", "tee", "install"]);
+    for (const frag of downstreamFragments) {
+      const tokens = tokenize(frag);
+      if (tokens.length === 0) continue;
+      const cmdBase = tokens[0].split("/").pop()!;
+      if (WRITE_DELETE.has(cmdBase)) {
+        for (let i = 1; i < tokens.length; i++) {
+          const t = tokens[i];
+          if (t.startsWith("-")) continue;
+          // Skip flag values (approximate: flag followed by a non-flag token).
+          if (/^-[a-zA-Z]/.test(t) && i + 1 < tokens.length && !tokens[i + 1].startsWith("-") && !isVisiblePathRef(tokens[i + 1])) {
+            i += 1;
+            continue;
+          }
+          if (!isVisiblePathRef(t)) { d2a = false; break; }
+        }
+        if (!d2a) break;
+      }
+    }
+  }
+
+  // Condition 10 (D2a): no cwd-relative positional args to commands WITHOUT an
+  // extractor. A command with no extractor (e.g. `sort`, `tar`, `git_log`)
+  // cannot consume `resolveBase` to extract its real post-cd path — its
+  // positional args are never added to `targets` (entry.ts: COMMAND_TABLE
+  // miss → D6 unknown command → 0 target). If the D2a exemption applied, the
+  // command would be `reliable:true` with 0 targets, silently allowing the
+  // access (e.g. `cd /tmp/x && sort data.txt` really reads `/tmp/x/data.txt`
+  // but extracts 0 targets). So any downstream fragment whose command has no
+  // extractor AND has a non-absolute positional path reference rejects the
+  // exemption (falls back to cd_chdir). Absolute-only no-extractor commands
+  // (e.g. `cd /etc && sort /tmp/data.txt`) still pass D2b and are exempt.
+  if (d2a) {
+    for (const frag of downstreamFragments) {
+      const tokens = tokenize(frag);
+      if (tokens.length === 0) continue;
+      const cmdBase = tokens[0].split("/").pop()!;
+      if (COMMAND_TABLE[cmdBase]) continue; // has extractor → resolveBase works
+      // No extractor: collect its positional args (FILE_ARG_COMMANDS) and
+      // reject if any is non-absolute (cwd-dependent).
+      if (!FILE_ARG_COMMANDS.has(cmdBase)) continue; // text cmd (echo etc.) → no positional path refs
+      const grepSkip = cmdBase === "grep" ? grepPatternSkipIdx(tokens) : new Set<number>();
+      for (let i = 1; i < tokens.length; i++) {
+        if (grepSkip.has(i)) continue;
+        const t = tokens[i];
+        if (t.startsWith("-")) continue;
+        if (cmdBase === "tar" && i === 1 && /^[a-zA-Z]+$/.test(t) && !isExplicitAbsolutePath(t) && !looksLikePath(t)) {
+          continue; // tar 操作标志，非路径引用
+        }
+        if (!isExplicitAbsolutePath(t)) { d2a = false; break; }
+      }
+      if (!d2a) break;
+    }
+  }
+
+  // Condition 11 (D2a): git WRITE subcommands with a non-tmp cd landing.
+  // 用户（总体设计部）拍板：git 只读子命令（log/show/diff/status 等，pathspec
+  // 是 git 内部管理的查询条件，非 shell cwd 文件引用）静默放行正确——条件
+  // 11 不排除它们；git 写子命令（rm/add/commit/checkout/clean/mv 等，修改
+  // 工作树文件）在 cd 链下若 cd 最终落点不在默认 tmp 目录，则保守排除豁免
+  // （回退 cd_chdir——真实删除/覆盖的文件依赖漂移后 cwd，但本解析器不把
+  // git 路径参数提取为 target，豁免会 0 target 静默放行）；cd 落点在默认
+  // tmp 目录（/tmp、/private/tmp、/var/tmp）时静默放行（tmp 无持久安全
+  // 价值，与 decision.ts step 2c 的 tmp_default_allowed 语义一致）。
+  if (d2a) {
+    const lastCd = cdFragments[cdFragments.length - 1];
+    const cdLanding = lastCd && lastCd.cdTarget ? lastCd.cdTarget : "";
+    const cdInTmp = cdLanding !== "" && isDefaultTmpPath(cdLanding);
+    if (!cdInTmp) {
+      for (const frag of downstreamFragments) {
+        if (isGitWriteSubcommand(frag)) { d2a = false; break; }
+      }
+    }
+  }
+
+  // --- D2b: all-absolute-downstream exemption ---
+  if (d2b) {
+    let anyAbsRef = false;
+    for (const frag of downstreamFragments) {
+      if (hasExplicitAbsPathRef(frag)) anyAbsRef = true;
+      // Any relative (cwd-dependent) ref blocks the exemption.
+      if (hasCwdRelativePathRef(frag)) { d2b = false; break; }
+      // Any network/fd target blocks the exemption.
+      const refs = collectStagePathRefs(frag);
+      for (const ref of refs) {
+        if (isNetOrFdTarget(ref)) { d2b = false; break; }
+      }
+      if (!d2b) break;
+    }
+    if (d2b && !anyAbsRef) d2b = false;
+  }
+
+  return { hasCd, d2a, d2b };
+}
+
+/**
+ * Whether the compound command qualifies for cwd tracking (cd-tracking
+ * exemption, D2a). When true, the extractor should maintain a simulated cwd
+ * starting at projectRoot and update it at each absolute cd target, resolving
+ * downstream relative paths against the tracked cwd.
+ */
+export function shouldTrackCdCwd(cmd: string): boolean {
+  return analyzeCd(cmd).d2a;
+}
+
+/**
+ * Scan a compound command for `cd` fragments and decide whether to fire
+ * `cd_chdir`.
+ *
+ * Fires when:
+ *   - any fragment's leading token (basename) is `cd`, AND
+ *   - neither the cd-tracking exemption (D2a) nor the all-absolute-downstream
+ *     exemption (D2b) applies.
+ *
+ * A lone `cd /etc` (no separator) has no downstream fragment and is NOT
+ * flagged. Returns `"cd_chdir"` when the guard fires, otherwise `undefined`.
+ */
+export function scanCdChdir(cmd: string): string | undefined {
+  const { hasCd, d2a, d2b } = analyzeCd(cmd);
+  if (!hasCd) return undefined;
+  if (d2a || d2b) return undefined;
+  return "cd_chdir";
 }
 
 // -------- Main extraction --------
