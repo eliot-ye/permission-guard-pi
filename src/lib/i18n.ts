@@ -64,7 +64,7 @@ const en: Bundle = {
   shell_forwarder:
     "Command executes via shell forwarder; filesystem access inside the string is invisible to static analysis. Execute the command directly rather than nesting a shell; select 'Allow for this session' to avoid repeat prompts",
   cd_chdir:
-    "Command contains cd, changing the working directory for subsequent commands. Downstream relative paths cannot be statically resolved; use absolute paths. If all downstream path references are explicit absolute paths, this command is auto-allowed; if the command is a `cd <absolute> && ...` chain (no ;/||/&/pipeline, absolute cd target, no . / .. / glob downstream), the system auto-resolves the real post-cd paths. Select 'Allow for this session' to avoid repeat prompts",
+    "Command contains cd, changing the working directory for subsequent commands. Downstream relative paths cannot be statically resolved; use absolute paths. If all downstream path references are explicit absolute paths, this command is auto-allowed; if the command is a `cd <absolute> && ...` chain (absolute cd target, no . / .. / glob downstream), the system auto-resolves the real post-cd paths; pipeline stages that pass the same path checks are auto-resolved as well. Select 'Allow for this session' to avoid repeat prompts",
   forwarding_command:
     "Command uses a forwarding tool (xargs/parallel etc.); downstream args come from upstream stdout, cannot be statically enumerated. Avoid using forwarders after pipes; select 'Allow for this session' to avoid repeat prompts",
   find_write_flag:
@@ -170,7 +170,7 @@ const zh: Bundle = {
   shell_forwarder:
     "该命令通过 shell 转发器执行，字符串内的文件系统访问不可见于静态分析。建议直接执行命令而非嵌套 shell；选择「允许本会话」可避免重复弹窗",
   cd_chdir:
-    "该命令包含 cd，改变后续命令的工作目录，下游相对路径无法静态解析。改用绝对路径；当下游全部路径引用为显式绝对路径时本系统会自动放行；若命令是 `cd <绝对路径> && …` 链（无 ;/||/&/管道、cd 目标绝对、下游无 . / .. /glob），本系统会自动解析出 cd 后的真实路径。选择「允许本会话」可避免重复弹窗",
+    "该命令包含 cd，改变后续命令的工作目录，下游相对路径无法静态解析。改用绝对路径；当下游全部路径引用为显式绝对路径时本系统会自动放行；若命令是 `cd <绝对路径> && …` 链（cd 目标绝对、下游无 . / .. /glob），本系统会自动解析出 cd 后的真实路径；管道各 stage 通过同样路径检查时同样自动放行。选择「允许本会话」可避免重复弹窗",
   forwarding_command:
     "该命令使用转发器（xargs/parallel 等），下游参数来自上游 stdout，无法静态枚举。建议避免在管道后使用转发器；选择「允许本会话」可避免重复弹窗",
   find_write_flag:

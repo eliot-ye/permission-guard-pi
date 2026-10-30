@@ -605,20 +605,16 @@ test("BTP-audit-97: shell_command_substitution_still_triggers_prompt", () => {
 });
 
 // Real audit #102: npm test | grep ... | tail (with no $(...)) → SHOULD be silent.
-// bash-hardening-round-2 L3: the compound command now starts with `cd /proj`,
-// so static analysis of the relative paths in the downstream pipeline is not
-// safe — `cd /proj && npm test | grep ... | tail` reports `cd_chdir` rather
-// than silently extracting the pipeline's downstream targets. This is the
-// intentional UX narrowing documented in proposal.md caller-impact analysis
-// (BTP-audit-102: "现按 L3 新规则应判 cd_chdir unreliable, 原断言 reliable:
-// true 需改为 reliable: false；这是有意的 UX 收窄, 不是 bug").
+// bash-hardening-round-2 L3 曾把该命令判 cd_chdir（UX 收窄），
+// bash-cd-chain-pipeline-exempt 放宽 cd 链豁免条件 3 后回退：管道各 stage
+// 逐项通过路径安全检查（npm test SILENT 0 target、grep pattern 跳过、
+// tail 读 stdin），无相对引用/裸词/锚点/glob → d2a 成立 → reliable:true。
+// 这是预期行为变化（回退到 L3 之前的原始静默语义），非回归。
 test("BTP-audit-102: npm_test_pipe_chain_cd_triggers_cd_chdir", () => {
   const cmd = `cd /proj && npm test 2>&1 | grep -E "^ *[✓✖]|pass|fail" | tail -20`;
   const r = extractBashTargets(cmd, "/proj");
-  assert.equal(r.reliable, false, "compound cd fragment now flags cd_chdir");
-  if (!r.reliable) {
-    assert.equal(r.reason, "cd_chdir");
-  }
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, []);
 });
 
 // Real audit #17: grep -rn "..." /path/*.md | head — the `*.md` glob is
@@ -3512,10 +3508,13 @@ test("BMG-CD-dash-reject: cd_dash_reject", () => {
 });
 
 test("BMG-CD-pipeline-reject: cd_pipeline_reject", () => {
-  // 条件 3 排除：含管道 `|`，cd 与管道交互不可静态确定。
+  // 条件 3 放宽（bash-cd-chain-pipeline-exempt）：cd 链 + 管道的各 stage 逐项
+  // 通过路径安全检查后可豁免。`cat a.txt | sort`：a.txt 是可提取相对路径，
+  // 按跟踪 cwd /tmp/x 解析（= CDC-PIPE-02），不再判 cd_chdir。
+  // 行为变化（预期）：原判 cd_chdir，现判 reliable + 解析出真实读目标。
   const r = extractBashTargets("cd /tmp/x && cat a.txt | sort", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, [{ action: "read", path: "/tmp/x/a.txt" }]);
 });
 
 test("BMG-CD-cwd-anchor-rm-reject: cd_cwd_anchor_rm_reject", () => {
@@ -4220,4 +4219,80 @@ test("BMG-CD-coreutils3-shred-abs-exempt: cd_shred_abs_exempt", () => {
   // 防过度修复对照：绝对路径位置参数仍走 D2b 豁免（cwd 无关）。
   const r = extractBashTargets("cd /etc && shred /tmp/a.txt", "/proj");
   assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+// ============================================================
+// bash-cd-chain-pipeline-exempt：cd 跟踪豁免条件 3 逐 stage 化
+// ============================================================
+
+test("CDC-PIPE-01: cd_pipe_zero_ref_stdin_silent", () => {
+  // 动机案例：纯 stdin 管道（零路径引用）不再误弹 cd_chdir，
+  // 与无管道的 `cd /abs && npm test` 静默放行语义等价。
+  const r = extractBashTargets("cd /proj && npm test 2>&1 | tail -25", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, []);
+});
+
+test("CDC-PIPE-02: cd_pipe_relative_track_cwd", () => {
+  // 可提取相对路径按跟踪 cwd 解析：cat a.txt | sort → /tmp/x/a.txt。
+  const r = extractBashTargets("cd /tmp/x && cat a.txt | sort", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, [{ action: "read", path: "/tmp/x/a.txt" }]);
+});
+
+test("CDC-PIPE-03: cd_pipe_bare_word_reject", () => {
+  // 裸词反例：sort sub（不可提取裸词）在管道非首 stage 仍判 cd_chdir。
+  const r = extractBashTargets("cd /etc && sort sub | wc -l", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("CDC-PIPE-04: cd_pipe_cwd_anchor_reject", () => {
+  // cwd 锚点反例：wc -l . 的 `.` 在管道内仍判 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x && wc -l . | head -5", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("CDC-PIPE-05: cd_pipe_glob_reject", () => {
+  // glob 反例：ls *.md 的未加引号 glob 在 cd 链下仍判 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x && ls *.md | wc -l", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("CDC-PIPE-06: cd_pipe_forwarder_guard_fallback", () => {
+  // 转发器兜底：cd 守卫豁免后 entry 不短路，转发器守卫判 forwarding_command。
+  const r = extractBashTargets("cd /etc && cat /etc/passwd | xargs rm", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "forwarding_command");
+});
+
+test("CDC-PIPE-07: cd_fragment_self_pipe_reject", () => {
+  // cd 片段自身含管道：cd a | b 语义不可静态确定，维持 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x | cat && grep pattern file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("CDC-PIPE-08: cd_pipe_git_write_nonfirst_stage_reject", () => {
+  // git 写子命令直接作为管道非首 stage 首命令：逐 stage 化后条件 11 仍须
+  // 命中（review warning 2 防漏拦：片段级检查只看首命令会漏掉第二 stage 的
+  // git rm）。注意不用 `git log | xargs git rm`——xargs 是转发器，会被 entry
+  // 转发器守卫先兜底为 forwarding_command，验证不了条件 11；用 git rm 直接
+  // 作 stage 首命令才能命中条件 11。
+  const r = extractBashTargets("cd /etc && git log | git rm file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("CDC-PIPE-09: cd_d2b_pipe_mixed_stage_exempt", () => {
+  // D2b 遍历单元换 stage 的新边界回归（review nit3）：混合 stage——无引用
+  // stage（`ls`）+ 全绝对引用 stage（`grep /abs/file`）时 D2b 仍成立（任一
+  // stage 有显式绝对引用即满足 anyAbsRef，相对/锚点/裸词无）。`;` 分隔下
+  // cd 跟踪豁免不适用，但全绝对下游豁免（D2b）逐 stage 判定后适用。
+  const r = extractBashTargets("cd /tmp/x; ls | grep pattern /tmp/x/file", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/file"),
+    `expected read /tmp/x/file in targets, got ${JSON.stringify(r.targets)}`);
 });

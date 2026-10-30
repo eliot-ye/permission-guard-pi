@@ -263,6 +263,30 @@ export function expandSafeVariables(cmd: string, env: NodeJS.ProcessEnv): string
 
 // -------- Command splitting --------
 
+// Determine whether the `&` at cmd[i] is a BACKGROUND separator (as opposed
+// to a redirect operator that happens to contain `&`). Per spec「管道按 stage
+// 独立提取」的 `&` 判定例外, these forms are NOT background separators:
+//   - `&>`      (stdout+stderr redirect, e.g. `echo hi &> /tmp/log`)
+//   - `& >`     (stderr independent redirect, `&` + space + `>`)
+//   - `N>&N`    (fd-dup, e.g. `2>&1` / `1>&2`)
+//   - `N>&-`    (fd-close, e.g. `2>&-`)
+// Anything else (`cmd & next`, trailing `&`) IS a background separator.
+export function isAmpBackgroundSeparator(cmd: string, i: number): boolean {
+  const next = i + 1 < cmd.length ? cmd[i + 1] : "";
+  const next2 = i + 2 < cmd.length ? cmd[i + 2] : "";
+  // `&>` — stdout+stderr redirect (no space).
+  if (next === ">") return false;
+  // `& >` — stderr independent redirect (`&` + space + `>`).
+  if (next === " " && next2 === ">") return false;
+  // `N>&N` / `N>&-` — fd-dup / fd-close (`&` preceded by `>`, followed by
+  // a digit or `-`).
+  if (next === "-" || /[0-9]/.test(next)) {
+    const prev = i > 0 ? cmd[i - 1] : "";
+    if (prev === ">") return false;
+  }
+  return true;
+}
+
 // Split compound commands by `;` or `&&` or `||`. Quote-aware: does NOT split
 // inside single or double quotes, and does NOT split after backslash escapes.
 
@@ -322,15 +346,10 @@ export function splitCommands(cmd: string): string[] {
       continue;
     }
     // Background separator `&` — but NOT `&>` (stdout+stderr redirect),
-    // `N>&N` (fd-dup) or `N>&-` (fd-close), where the `&` is preceded by a
-    // digit and followed by `>`. In those cases the `&` is part of a redirect
+    // `N>&N` (fd-dup) or `N>&-` (fd-close), where the `&` is part of a redirect
     // operator, not a background operator.
     if (ch === "&") {
-      const prev = i > 0 ? cmd[i - 1] : "";
-      const next = i + 1 < cmd.length ? cmd[i + 1] : "";
-      const isFdRedirect = /[0-9]/.test(prev) && next === ">";
-      const isStdoutStderrRedirect = next === ">";
-      if (!isFdRedirect && !isStdoutStderrRedirect) {
+      if (isAmpBackgroundSeparator(cmd, i)) {
         if (cur.trim()) parts.push(cur.trim());
         cur = "";
         i += 1;

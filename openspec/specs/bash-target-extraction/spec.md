@@ -1784,7 +1784,7 @@ type ExtractResult =
 
 1. **纯 `&&` 链**——`splitCommands` 拆出的所有片段之间都是 `&&` 分隔（无 `;`、`||`、`&`、`\n`）；分隔符判定 MUST 复用 `splitCommands` 的 quote-aware 分隔扫描，不得裸扫 `;`/`||`/`&`/`\n`（引号内的 `;` 不是分隔符，如 `cd /tmp/x && echo "a;b"` 仍应判纯 `&&` 链）。理由：`&&` 短路语义保证「下游片段执行 ⇒ 前面所有 cd 都成功 ⇒ cwd = 最后一个成功 cd 的目标」——这是 cwd 跟踪确定性的基础（实验已验证：`&&` 下 cd 失败 → 下游不执行；`;` 下 cd 失败 → 下游仍执行，cwd 不更新，不可静态确定）
 2. **所有 cd 目标都是显式绝对路径**——每个 `cd <target>` 的 `<target>` 以 `/` 开头或满足 Windows 盘符 `C:\`，且不含 `$VAR`、`~`、未加引号 glob 元字符、相对前缀（`./`/`../`）；**绝对性判定作用于 `tokenize` 去引号后的 token 形式**（如 `cd "/tmp/x"` 去引号后为 `/tmp/x`，判绝对）。理由：相对 cd 目标依赖当前 cwd 与 `CDPATH`（实验已验证 CDPATH 完全改变 `cd sub` 的目标）；`~`/`$VAR`/`cd -` 均依赖运行时环境——均不可静态确定
-3. **无管道**——每个片段的 `splitPipelines` 结果恰好 1 stage（cd 与管道交互不可静态确定）
+3. **管道逐 stage 路径安全**——下游片段允许含管道，但其 `splitPipelines` 拆出的**每个 pipeline stage**（fd 复制如 `2>&1` 不是分隔符，留在其所属 stage 内不拆分）MUST 逐 stage 满足条件 4~11 的同等内容（cwd 锚点 / 未加引号 glob / 网络套接字与数字 fd / 不可提取裸词 / `$PWD`·`$OLDPWD` / 无 extractor 命令非绝对位置参数 / git 写子命令检查，均按 stage 内的路径引用判定）；cd 片段自身的 `splitPipelines` 结果 MUST 仍恰好 1 stage（`cd a | b` 语义不可静态确定）。**理由**：bash 管道各 stage 继承 `cd` 后的 cwd，其路径解析语义与下游片段完全一致——逐 stage 应用同一组检查后无安全增量；原「无管道」一刀切对 `cd <绝对> && npm test 2>&1 | tail -25` 这类下游零路径引用的纯 stdin 管道产生误弹窗（与无管道的 `cd <绝对> && npm test` 静默放行不等价）。转发器（`xargs`/`parallel`/`pforeach`）不在此条件排除——cd 守卫豁免后由「转发器命令守卫」独立判定（entry 层 cd 守卫豁免不短路后续扫描）
 4. **无 cwd 锚点路径引用**——cd 片段之后的任何下游片段 MUST NOT 含 cwd 锚点路径引用（`.`、`..`、`./`、`../`、或以 `.`/`..` 结尾/含 `.`/`..` 片段的相对路径，含重定向目标与位置参数）。理由：`.`/`..` 是 cwd 的锚点，`looksLikePath`/`extractRedirects` 不把它们提取为 target（实测 `rm -rf .` 在非 cd 场景提取 0 target），若在 cd 跟踪下放行会**静默放行 cwd 锚点操作**（`cd /etc && rm -rf .` 真实删 `/etc` 内容，但跟踪下提取 0 target 绕过拦截）——这是 cd 跟踪豁免的**安全洞**，必须显式排除
 5. **无未加引号 glob**——cd 片段之后的任何下游片段 MUST NOT 含未加引号的 glob 元字符（`*`、`?`、`[`，含位置参数与重定向目标）。理由：glob 展开依赖执行时的 cwd，cd 跟踪下 cwd 已漂移；且「有界 glob 免不可靠标记」的空 prefix 放宽（边界①情形 B）假设 `cwd == projectRoot`，该假设在 cd 链下**失效**——`cd /tmp/x && ls *.md` 的真实展开在 `/tmp/x`，不在 projectRoot，若放行会误解析到 projectRoot。故 cd 跟踪豁免统一排除 glob（无论前缀空/相对/绝对），维持 `cd_chdir`
 6. **无网络套接字 / 数字 fd 重定向目标**——cd 片段之后的任何下游片段 MUST NOT 含网络套接字 / 数字 fd 重定向目标（`/dev/tcp/`、`/dev/udp/`、`/dev/fd/[0-9]+` 前缀）。理由：它们是网络外传 / 任意 fd 访问目标，不是「cd 造成的 cwd 漂移影响文件系统路径解析」的场景，cd 跟踪豁免的语义（cwd 模拟解析真实落点）对其不适用；含此类目标的片段使 D2a 豁免不适用，维持 `cd_chdir`（网络外传不因 cd 豁免被放行）
@@ -1934,7 +1934,42 @@ type ExtractResult =
 #### Scenario: cd 后管道仍判不可靠（cd 跟踪豁免条件3排除）
 
 - **WHEN** bash 命令为 `cd /tmp/x && cat a.txt | sort`，projectRoot 为 `/proj`
-- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——含管道（`|`），cd 跟踪豁免条件 3 不满足（cd 与管道交互不可静态确定）
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /tmp/x/a.txt] }`，不触发 `cd_chdir`——纯 `&&` 链 + 绝对 cd 目标；管道逐 stage 检查（条件 3 放宽后）：`cat a.txt` stage 的 `a.txt` 是可提取相对路径，按跟踪 cwd `/tmp/x` 解析为真实落点（**行为变化（预期）**：原判 `cd_chdir`，管道语义与下游片段一致，逐 stage 检查无安全增量）
+
+#### Scenario: cd 后零路径引用纯 stdin 管道豁免（本 change 动机案例）
+
+- **WHEN** bash 命令为 `cd /proj && npm test 2>&1 | tail -25`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: true, targets: [] }`，不触发 `cd_chdir`——纯 `&&` 链 + 绝对 cd 目标；管道逐 stage 检查：`npm test` 是 SILENT 命令 0 target，`tail -25` 读 stdin 无路径引用，fd 复制 `2>&1` 不拆分——与无管道的 `cd /proj && npm test` 静默放行语义等价
+
+#### Scenario: cd 后管道含不可提取裸词仍判不可靠（条件 3 放宽后逐 stage 排除）
+
+- **WHEN** bash 命令为 `cd /etc && sort sub | wc -l`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——管道 stage `sort sub` 的位置参数 `sub` 是不可提取裸词（`looksLikePath` 判 false），真实落点 `/etc/sub`，逐 stage 检查命中条件 10，维持 `cd_chdir`
+
+#### Scenario: cd 后管道含 cwd 锚点仍判不可靠（条件 3 放宽后逐 stage 排除）
+
+- **WHEN** bash 命令为 `cd /tmp/x && wc -l . | head -5`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——管道 stage `wc -l .` 含 cwd 锚点 `.`，逐 stage 检查命中条件 4，维持 `cd_chdir`
+
+#### Scenario: cd 后管道含未引号 glob 仍判不可靠（条件 3 放宽后逐 stage 排除）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls *.md | wc -l`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——管道 stage `ls *.md` 含未加引号 glob（cd 链下 glob 展开依赖漂移后 cwd），逐 stage 检查命中条件 5，维持 `cd_chdir`
+
+#### Scenario: cd 后管道含转发器由转发器守卫兜底（cd 守卫不短路）
+
+- **WHEN** bash 命令为 `cd /etc && cat /etc/passwd | xargs rm`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "forwarding_command" }`——cd 跟踪豁免的管道逐 stage 检查不含转发器排除项（cd 守卫豁免），但 entry 层 cd 守卫豁免后**不短路**后续扫描，转发器命令守卫独立判定 `forwarding_command`；下游 `rm` 是 write 命令，不满足 read-only 下游豁免
+
+#### Scenario: cd 后 git 写子命令位于管道非首 stage 仍判不可靠（条件 11 逐 stage 排除）
+
+- **WHEN** bash 命令为 `cd /etc && git log | xargs git rm`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——条件 11 逐 stage 检查：非首 stage `xargs git rm` 含 git 写子命令 `rm`（不在 `GIT_READONLY_SUBCOMMANDS`），cd 落点 `/etc` 非默认 tmp，维持 `cd_chdir`（逐 stage 化后条件 11 覆盖非首 stage，防片段级检查只看首命令的漏拦）
+
+#### Scenario: cd 片段自身含管道仍判不可靠（条件 3 cd 片段单 stage 约束）
+
+- **WHEN** bash 命令为 `cd /tmp/x | cat && grep pattern file.txt`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——cd 片段自身的 `splitPipelines` 结果非 1 stage（`cd a | b` 语义不可静态确定），条件 3 不满足
 
 #### Scenario: cd 后 cwd 锚点 rm 仍判不可靠（cd 跟踪豁免条件4排除）
 

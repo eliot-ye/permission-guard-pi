@@ -1,7 +1,7 @@
 // Bash extraction: shell forwarders (bash -c), wrappers, cd-chdir, forwarders (xargs).
 // Pure module — no IO / no side effects.
 
-import { splitCommands, splitPipelines, tokenize, looksLikePath } from "./parse.ts";
+import { splitCommands, splitPipelines, tokenize, looksLikePath, isAmpBackgroundSeparator } from "./parse.ts";
 import { isReadOnlyWithArgs, isDevSocketOrFd } from "./readonly.ts";
 import { COMMAND_TABLE } from "./extractors.ts";
 import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
@@ -709,11 +709,14 @@ function isGitWriteSubcommand(stage: string): boolean {
  * Returns `{ hasCd, d2a, d2b }`:
  *   - `hasCd`: any fragment's leading token (basename) is `cd`.
  *   - `d2a` (cd-tracking exemption): pure `&&` chain + all cd targets explicit
- *     absolute + no pipeline + no cwd-anchor refs + no unquoted glob + no
- *     network/fd redirect targets + no unextractable non-absolute write/delete
- *     positional + no `$PWD`/`$OLDPWD`. When true, downstream relative paths
- *     may be resolved against a tracked cwd.
- *   - `d2b` (all-absolute-downstream exemption): every downstream fragment's
+ *     absolute + cd fragments single-stage + downstream pipeline stages pass
+ *     per-stage checks (no cwd-anchor refs, no unquoted glob, no network/fd
+ *     redirect targets, no unextractable non-absolute refs, no
+ *     `$PWD`/`$OLDPWD`, no no-extractor non-absolute positionals, no git write
+ *     subcommand at a non-tmp cd landing). When true, downstream relative
+ *     paths may be resolved against a tracked cwd; pipeline stages are allowed
+ *     and checked per stage (condition 3 relaxed by bash-cd-chain-pipeline-exempt).
+ *   - `d2b` (all-absolute-downstream exemption): every downstream stage's
  *     path refs are all explicit absolute (and at least one exists, and no
  *     network/fd target, and no relative ref).
  */
@@ -752,7 +755,15 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
         if (ch === '"') { i += 1; while (i < cmd.length && cmd[i] !== '"') i += 1; i += 1; continue; }
         if (cmd.startsWith("&&", i)) { i += 2; expectAnd = false; continue; }
         if (cmd.startsWith("||", i)) { return false; }
-        if (ch === ";" || ch === "&" || ch === "\n") return false;
+        // 复用 parse.ts 的 & 分隔符判定——`2>&1`（fd-dup）/`N>&-`（fd-close）/
+        // `&>`/`& >` 的 `&` 是重定向操作符，不是后台分隔符，不构成非纯 `&&` 链
+        // 的证据（spec 条件 1 要求复用 splitCommands 的 quote-aware 扫描）。
+        if (ch === "&") {
+          if (isAmpBackgroundSeparator(cmd, i)) { return false; }
+          i += 1;
+          continue;
+        }
+        if (ch === ";" || ch === "\n") return false;
         i += 1;
       }
       return !expectAnd;
@@ -771,15 +782,27 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
     }
   }
 
-  // Condition 3: no pipeline in any fragment (each fragment is 1 stage).
+  // Condition 3: cd fragments must themselves be single-stage. Downstream
+  // fragments MAY contain pipelines: each pipeline stage inherits the post-cd
+  // cwd, so its path semantics are identical to a downstream fragment, and the
+  // per-stage checks in conditions 4-11 below apply to every stage. A cd
+  // fragment with its own pipeline (`cd a | b`) is not statically
+  // determinable and stays rejected. 放宽理由（bash-cd-chain-pipeline-exempt）：
+  // 原「无管道」一刀切对 `cd <abs> && npm test 2>&1 | tail -25` 这类零路径
+  // 引用纯 stdin 管道误弹 cd_chdir，与无管道等价命令（静默放行）不等价；
+  // 管道 stage 逐项走条件 4~11 检查后无安全增量。
   if (d2a) {
-    for (const frag of fragments) {
-      if (splitPipelines(frag).length !== 1) { d2a = false; break; }
+    for (const cd of cdFragments) {
+      if (splitPipelines(cd.frag).length !== 1) { d2a = false; break; }
     }
   }
 
-  // Determine downstream fragments (those AFTER a cd fragment).
-  const downstreamFragments: string[] = [];
+  // Determine downstream stages (pipeline stages of fragments AFTER a cd
+  // fragment). 条件 3 放宽后下游片段允许管道——每个 pipeline stage 继承
+  // cd 后 cwd，路径语义与下游片段一致，故展平为 stage 粒度作为条件 4~11
+  // 与 D2b 的判定单元（fragment 全文喂入会把 `|` 后内容超范围当路径引用，
+  // stage 级为准更精确）。
+  const downstreamStages: string[] = [];
   {
     let cdSeen = false;
     for (const frag of fragments) {
@@ -789,14 +812,19 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
       if (tokens.length === 0) continue;
       const firstBase = tokens[0].split("/").pop()!;
       if (firstBase === "cd") { cdSeen = true; continue; }
-      if (cdSeen) downstreamFragments.push(trimmed);
+      if (cdSeen) {
+        for (const st of splitPipelines(trimmed)) {
+          const stTrimmed = st.trim();
+          if (stTrimmed) downstreamStages.push(stTrimmed);
+        }
+      }
     }
   }
 
-  // Condition 4 (D2a): no cwd-anchor path refs in downstream fragments.
-  // Condition 5 (D2a): no unquoted glob in downstream fragments.
-  // Condition 6 (D2a): no network/fd redirect targets in downstream fragments.
-  // Condition 8 (D2a): no `$PWD` / `$OLDPWD` in downstream fragments.
+  // Condition 4 (D2a): no cwd-anchor path refs in downstream stages.
+  // Condition 5 (D2a): no unquoted glob in downstream stages.
+  // Condition 6 (D2a): no network/fd redirect targets in downstream stages.
+  // Condition 8 (D2a): no `$PWD` / `$OLDPWD` in downstream stages.
   // Condition 9 (D2a): no unextractable non-absolute path reference. A bare
   // word (e.g. `sub`, `sub/`, `src`) that `looksLikePath` rejects is NOT
   // extracted as a target, yet its real location depends on the tracked cwd
@@ -808,8 +836,8 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // (`echo x > sub`), fixing the critical gap where condition 7 only checked
   // write/delete positional args.
   if (d2a) {
-    for (const frag of downstreamFragments) {
-      const refs = collectStagePathRefs(frag);
+    for (const stage of downstreamStages) {
+      const refs = collectStagePathRefs(stage);
       for (const ref of refs) {
         if (containsCwdAnchor(ref)) { d2a = false; break; }
         if (containsUnquotedGlob(ref)) { d2a = false; break; }
@@ -817,11 +845,11 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
         // 条件 9：非绝对 + 非网络/fd + 不可提取裸词 → 排除。
         if (!isExplicitAbsolutePath(ref) && !isNetOrFdTarget(ref) && !looksLikePath(ref)) { d2a = false; break; }
       }
-      if (frag.includes("$PWD") || frag.includes("$OLDPWD")) { d2a = false; break; }
-      // Also scan whole raw fragment for unquoted glob (not just path refs).
-      if (containsUnquotedGlob(frag)) { d2a = false; break; }
-      // Also scan for any cwd anchor in raw fragment text (e.g. `rm -rf .`).
-      if (containsCwdAnchor(frag)) { d2a = false; break; }
+      if (stage.includes("$PWD") || stage.includes("$OLDPWD")) { d2a = false; break; }
+      // Also scan whole raw stage for unquoted glob (not just path refs).
+      if (containsUnquotedGlob(stage)) { d2a = false; break; }
+      // Also scan for any cwd anchor in raw stage text (e.g. `rm -rf .`).
+      if (containsCwdAnchor(stage)) { d2a = false; break; }
     }
   }
 
@@ -829,8 +857,8 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // absolute or looksLikePath-extractable. Reject unextractable relative args.
   if (d2a) {
     const WRITE_DELETE = new Set(["rm", "mkdir", "rmdir", "mv", "cp", "touch", "ln", "chmod", "chown", "truncate", "dd", "tee", "install"]);
-    for (const frag of downstreamFragments) {
-      const tokens = tokenize(frag);
+    for (const stage of downstreamStages) {
+      const tokens = tokenize(stage);
       if (tokens.length === 0) continue;
       const cmdBase = tokens[0].split("/").pop()!;
       if (WRITE_DELETE.has(cmdBase)) {
@@ -861,8 +889,8 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // exemption (falls back to cd_chdir). Absolute-only no-extractor commands
   // (e.g. `cd /etc && sort /tmp/data.txt`) still pass D2b and are exempt.
   if (d2a) {
-    for (const frag of downstreamFragments) {
-      const tokens = tokenize(frag);
+    for (const stage of downstreamStages) {
+      const tokens = tokenize(stage);
       if (tokens.length === 0) continue;
       const cmdBase = tokens[0].split("/").pop()!;
       if (COMMAND_TABLE[cmdBase]) continue; // has extractor → resolveBase works
@@ -897,8 +925,8 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
     const cdLanding = lastCd && lastCd.cdTarget ? lastCd.cdTarget : "";
     const cdInTmp = cdLanding !== "" && isDefaultTmpPath(cdLanding);
     if (!cdInTmp) {
-      for (const frag of downstreamFragments) {
-        if (isGitWriteSubcommand(frag)) { d2a = false; break; }
+      for (const stage of downstreamStages) {
+        if (isGitWriteSubcommand(stage)) { d2a = false; break; }
       }
     }
   }
@@ -906,12 +934,12 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // --- D2b: all-absolute-downstream exemption ---
   if (d2b) {
     let anyAbsRef = false;
-    for (const frag of downstreamFragments) {
-      if (hasExplicitAbsPathRef(frag)) anyAbsRef = true;
+    for (const stage of downstreamStages) {
+      if (hasExplicitAbsPathRef(stage)) anyAbsRef = true;
       // Any relative (cwd-dependent) ref blocks the exemption.
-      if (hasCwdRelativePathRef(frag)) { d2b = false; break; }
+      if (hasCwdRelativePathRef(stage)) { d2b = false; break; }
       // Any network/fd target blocks the exemption.
-      const refs = collectStagePathRefs(frag);
+      const refs = collectStagePathRefs(stage);
       for (const ref of refs) {
         if (isNetOrFdTarget(ref)) { d2b = false; break; }
       }
