@@ -377,7 +377,8 @@ function hasGrant(
 // scanner. The remaining tier=two prompts come from a small set of
 // constructs that truly cannot be statically analyzed:
 //   - Forwarders (xargs, parallel, pforeach) in non-first pipeline stages
-//   - Command substitution ($( ... ), backtick)
+//   - Command substitution ($( ... ) outside the read-only helper
+//     whitelist, backtick)
 //   - Process substitution <(...) / >(...)
 //   - Heredocs <<EOF
 //   - Unquoted globs (* ? [) outside quotes
@@ -392,6 +393,13 @@ function hasGrant(
 // docs/extensions.md, that lets pi append a transcript delta for the current
 // run without replacing the whole system prompt (which would drop the tools
 // list, skills, cwd, and any other extension's guidance).
+//
+// Keep this list in sync with the actual extractor tables in
+// src/lib/bash-extract/silent.ts (SILENT_COMMANDS / UNRELIABLE_COMMANDS)
+// and scan.ts (SUBSTITUTION_READONLY_CMDS). Drift here misleads the LLM:
+// "silent" claims for commands that actually prompt (rg/jq/cargo) defeat
+// the noise-reduction goal; "always prompt" claims for commands that are
+// actually silent ($(basename)) make the LLM avoid useful paths.
 const BASH_GUARDRAILS: string[] = [
   // ── Layer 1: 决策层 ────────────────────────────────────────────────
   // 显式说明"弹窗是噪音"的动机，让 LLM 主动选静默路径而非被动避坑。
@@ -409,14 +417,13 @@ const BASH_GUARDRAILS: string[] = [
   "- Search contents: `grep` (handles patterns like `- [ ]` without quoting)",
   "- List files: `find`",
   "- Inspect git state: `git status`, `git diff`, `git log --stat`",
-  "- Run checks/tests: `npm test`, `cargo check`, `tsc --noEmit`, " +
-    "`go vet`, `go test`",
+  "- Run checks/tests: `npm test`, `tsc --noEmit`, `go vet`",
   "- In-project read-only glob (auto-allowed): `ls openspec/*`, " +
     "`find . -name '*.ts'`, `cat src/a.ts`, `wc -l src/*.ts`, " +
     "`git log src/`, `for x in *.log; do wc -l \"$x\"; done`",
   "- Dev-tool read-only forms (silent): `git status/diff/log/show`, " +
-    "`npm test/check`, `cargo check/test`, `tsc --noEmit`, " +
-    "`go vet/test`, `rg`, `jq`, `head`/`tail`/`wc`/`stat` on project paths",
+    "`npm test`, `tsc --noEmit`, `go vet`, " +
+    "`head`/`tail`/`wc`/`stat` on project paths",
 
   // ── Layer 3: 弹窗陷阱清单（每条 → 替代方案）────────────────────────
   // 原稿 7 条陷阱全部保留并结构化，追加"敏感系统路径"条（提醒性，
@@ -425,12 +432,15 @@ const BASH_GUARDRAILS: string[] = [
     "alternative:",
   "- Forwarders after pipelines: `| xargs`, `| parallel`, `| pforeach` " +
     "→ use a shell loop via dedicated tool, or restructure",
-  "- Command / process / heredoc substitution: `$(...)`, backtick, " +
-    "`<(...)`, `<<EOF` → inline the value or write a small script file first",
+  "- Command substitution `$(...)`: prompts only when the inner command " +
+    "is NOT a read-only helper (`basename`/`dirname`/`echo`/`printf`/" +
+    "`pwd`/`test` — those are silent). Other forms (`$(cat ...)`, " +
+    "`$(rm ...)`, backtick, `<(...)`, `<<EOF`) prompt → inline the " +
+    "value or write a small script file first",
   "- Control-flow as standalone tokens: `while`, `for`, `until`, `if`, " +
     "`case` (esp. `for x in /etc/*.conf; do ...` with absolute prefix, or " +
     "`for x in *.log; do rm \"$x\"; done` with write body) → replace with " +
-    "`grep`/`find`/`rg` for read-only relative-prefix loops",
+    "`grep`/`find` for read-only relative-prefix loops",
   "- Unquoted globs outside project, OR in write/delete commands " +
     "(`rm -rf /tmp/*.log`, `find /etc | xargs rm`) → quote them, use " +
     "project-scoped globs, or use `grep`/`find` tool",
@@ -441,9 +451,10 @@ const BASH_GUARDRAILS: string[] = [
     "`ruby`, `osascript`, `scp`, `ssh`, `rsync`, `kubectl`, `docker`, " +
     "`eval`, `exec`, `trap` → prefer `read`/`grep`/`find`; " +
     "remote/exec tools always prompt",
-  "- Non-read-only dev-tool forms: `npm run build`, `make -f /tmp/x.mk`, " +
-    "`git log /etc/passwd` → use read-only forms; check whether a " +
-    "project-scoped variant exists",
+  "- Dev-tool forms that prompt (incl. no-static-extraction commands " +
+    "moved out of silent: `rg`, `jq`, `cargo`, `go test`): " +
+    "`npm run build`, `make -f /tmp/x.mk`, `git log /etc/passwd` " +
+    "→ use the silent forms above, or a project-scoped variant",
   "- Sensitive system paths outside the project (`/etc`, `/usr`, `/System`, " +
     "`~/.ssh`, `~/.aws`) → usually prompt or hard-deny; edit " +
     "`permission.json` to persist a grant if needed",
