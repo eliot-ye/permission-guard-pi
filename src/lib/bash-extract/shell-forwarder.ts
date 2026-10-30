@@ -554,6 +554,52 @@ function grepPatternSkipIdx(tokens: string[]): Set<number> {
 }
 
 /**
+ * 判断 token 是否以重定向形态开头（tokenize 不拆分这些形态，如
+ * `2>/dev/null`、`>foo`、`2>&1`、`<in`）。这类 token 的重定向目标已由
+ * collectStagePathRefs 末尾的重定向扫描单独提取（`N>`/`N>>`/`2>&N`/`>`/
+ * `>>`/`<`），位置参数循环重复收集是多余且有害的——它把 `2>/dev/null`
+ * 整串当非绝对引用，杀 cd 豁免（D2a 条件 9 / D2b）。
+ *
+ * 只跳过「目标已由扫描提取」或「确无文件目标」的形态（逐项对齐扫描）：
+ *  - `^[0-9]*>&(?:[0-9]+|-)$`：纯数字 fd 复制/关闭（`2>&1`、`>&2`、`2>&3`、
+ *    `2>&-`）——扫描明确跳过（无文件目标）。
+ *  - `^[0-9]*(?:>>|>|<)` 且不含 `&` 且非 `<<` 前缀：文件重定向（`1>`、`2>`、
+ *    `3>`、`>`、`>>`、`1>>`、`<`）——扫描逐字符推进到 `>`/`<` 处识别并提取
+ *    其后目标（`N>` 的 `N` 被当普通字符跳过，`>` 处仍识别）。
+ *
+ * 不跳过（保持收集 → 保守 cd_chdir，与现状一致）：
+ *  - `>&file` / `2>&file` / `N>&file`（文件词 fd 复制，等价 `>file 2>&1`）：
+ *    扫描对 `>&` 一律 `continue` 不提取其文件目标；跳过会丢失写目标 →
+ *    cd 豁免静默放行相对写目标（安全洞，架构 review critical 修复）。
+ *  - `&>` / `&>>`：扫描对 `&` 当普通字符跳过、`>` 处识别并提取其后目标为
+ *    相对 ref（D2b 拒绝豁免），但 extractRedirects 不识别 `&>` 操作符——
+ *    写目标不进 targets。保持收集，保守 cd_chdir（现状不变，安全）。
+ *  - `<<EOF` / `<<<str`（heredoc / here-string）：splitCommands 可能拆分其
+ *    内容为独立片段，保守维持现状弹窗（实测 `cd /abs && ls /abs/x <<EOF`
+ *    实际 reason 为 `heredoc`——由 scanUnreliable 在 cd 守卫之前拦截，方向
+ *    安全；判据不跳过 `<<` 前缀，整 token 被收集为不可提取裸词 → 条件 9
+ *    排除，双保险维持保守）。
+ *  - `foo>bar`（位置参数 + 重定向混合）：`foo` 是真实位置参数，不以操作符
+ *    开头，不命中。
+ *  - 引号内 `>`（`cat "a>b"`）：token 以 `a` 开头，不命中。
+ */
+function isRedirectPrefixToken(token: string): boolean {
+  if (!token) return false;
+  // 纯数字 fd 复制/关闭（扫描明确跳过，无文件目标）。
+  if (/^[0-9]*>&(?:[0-9]+|-)$/.test(token)) return true;
+  // 文件重定向（扫描提取其目标）；排除含 `&` 的形态与 `<<` 前缀。
+  // `.+`：操作符后必须有至少一个字符（内嵌目标）。`>&file`/`2>&file` 经
+  // splitCommands 在 `&` 处拆分会**产生裸 `>`/`2>`**（如 "ls /tmp/x >"），
+  // 裸操作符不匹配 `.+`——保持收集（looksLikePath false → 保守 cd_chdir，
+  // 与现状一致），否则 `>&rel.txt` 的写目标 `rel.txt` 完全丢失、D2b 豁免
+  // 成立 → 静默放行写相对目标（安全洞，架构 review critical 修复的判据）。
+  if (/^[0-9]*(?:>>|>|<).+/.test(token) && !token.includes("&") && !/^[0-9]*<</.test(token)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Collect the path-bearing tokens from a pipeline stage: positional args
  * (excluding flags and grep pattern) plus redirect targets.
  *
@@ -578,6 +624,12 @@ function collectStagePathRefs(stage: string): string[] {
         if (grepSkip.has(i)) continue;
         const t = tokens[i];
         if (t.startsWith("-")) continue;
+        // 重定向形态 token（`2>/dev/null`、`>foo`、`2>&1`、`<in`）不是位置
+        // 参数——其重定向目标已由下方扫描提取为 ref（或纯 fd 复制无文件
+        // 目标）。跳过避免把 `2>/dev/null` 整串当非绝对引用收集，杀 cd 豁免
+        // （D2a 条件 9 / D2b）。`>&file`/`&>`/`foo>bar`/`<<` 不命中（保持收集，
+        // 保守 cd_chdir，与现状一致）。
+        if (isRedirectPrefixToken(t)) continue;
         // tar：第一个位置参数（i===1，不带 `-`）若是纯字母操作标志（xf/cf/tf/
         // xzf/czf 等），它不是路径引用——跳过。flag 形式（`tar -xvf ...`）下
         // 操作标志以 `-` 开头已被上方跳过，第一个非 flag 位置参数是真实文件

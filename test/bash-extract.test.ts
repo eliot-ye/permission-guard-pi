@@ -4296,3 +4296,113 @@ test("CDC-PIPE-09: cd_d2b_pipe_mixed_stage_exempt", () => {
   assert.ok(r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/file"),
     `expected read /tmp/x/file in targets, got ${JSON.stringify(r.targets)}`);
 });
+
+// ============================================================
+// bash-extract-redirect-token-cd-exempt：重定向 token 误当位置参数收集修复
+// ============================================================
+//
+// 洞（实测）：tokenize 不拆分 `2>/dev/null` 等重定向形态，collectStagePathRefs
+// 的位置参数循环把它整串当非绝对引用收集 → `cd /abs && ls /abs/x 2>/dev/null`
+// 误判 cd_chdir（D2a 条件 9 / D2b 双双命中）。修复：isRedirectPrefixToken 跳过
+// 「目标已由重定向扫描提取」或「纯数字 fd 复制（无文件目标）」的形态。
+//
+// 判定原则（架构 review critical）：
+//   - 跳过：`2>/dev/null`、`2>&1`、`>&2`、`2>&-`、`1>`/`2>`/`>`/`>>`/`<`（扫描会提取目标或纯 fd 复制无文件目标）
+//   - 不跳过：`>&file`/`2>&file`/`N>&file`（文件词 fd 复制，扫描不提取目标，跳过会静默放行写目标）、
+//     `&>`/`&>>`、`foo>bar`、`<<EOF`——保持保守 cd_chdir（与现状一致）
+//
+// 用例 3 断言降级为核心契约（reliable + 读 /tmp/x + 写 /tmp/err.log）：
+// 现状 targets 含幽灵 `{read, /tmp/x/2>>/tmp/err.log}`——那是既有 extractor
+// 层普适 bug（非 cd 场景 `ls /tmp/x 2>>/tmp/err.log` 也产生，tokenize 把
+// `2>>...` 当位置参数传给 readExtract），安全中性（多一个噪音 target，偏保守，
+// 非静默放行），独立于本 change 的 cd 豁免修复，记为已知边界（tasks.md），
+// 本 change 不修，故不断言幽灵 target 消失。
+
+test("BMG-CD-redirect-token-abs-exempt: cd_redirect_token_abs_exempt", () => {
+  // 动机案例：`2>/dev/null` 是重定向 token（非位置参数），D2b 豁免成立。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x 2>/dev/null", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(r.targets.some((t) => t.action === "read" && t.path === "/tmp/x"),
+    `expected read /tmp/x in targets, got ${JSON.stringify(r.targets)}`);
+});
+
+test("BMG-CD-redirect-token-fd-copy-exempt: cd_redirect_token_fd_copy_exempt", () => {
+  // `2>&1` 是 fd 复制（无文件目标），cd 跟踪豁免逐 stage 检查通过。
+  const r = extractBashTargets("cd /tmp/x && cat /tmp/x/file.txt 2>&1 | head", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/file.txt"),
+    `expected read /tmp/x/file.txt in targets, got ${JSON.stringify(r.targets)}`);
+});
+
+test("BMG-CD-redirect-token-abs-write-exempt: cd_redirect_token_abs_write_exempt", () => {
+  // `2>>/tmp/err.log` 写目标绝对，D2b 豁免成立。
+  // 核心契约断言：reliable:true + 读 /tmp/x + 写 /tmp/err.log。
+  // 注：现状 targets 含幽灵 `{read, /tmp/x/2>>/tmp/err.log}`——那是既有
+  // extractor 层普适 bug（非 cd 场景 `ls /tmp/x 2>>/tmp/err.log` 也产生
+  // `/proj/2>>/tmp/err.log`，tokenize 把 `2>>...` 当位置参数传给 readExtract），
+  // 安全中性（多一个噪音 target，偏保守，非静默放行），独立于本 change 的
+  // cd 豁免修复，记为已知边界（tasks.md）。本用例只断言本 change 负责的
+  // 核心契约，不断言幽灵 target 消失。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x 2>>/tmp/err.log", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(r.targets.some((t) => t.action === "read" && t.path === "/tmp/x"),
+    `expected read /tmp/x in targets, got ${JSON.stringify(r.targets)}`);
+  assert.ok(r.targets.some((t) => t.action === "write" && t.path === "/tmp/err.log"),
+    `expected write /tmp/err.log in targets, got ${JSON.stringify(r.targets)}`);
+});
+
+test("BMG-CD-redirect-token-rel-posarg-reject: cd_redirect_token_rel_posarg_reject", () => {
+  // 反例：`sub` 是真实相对位置参数（非重定向 token），仍保守 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x && ls sub 2>/dev/null", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-redirect-token-rel-redirect-reject: cd_redirect_token_rel_redirect_reject", () => {
+  // 反例：`out.txt` 是相对重定向写目标，D2b 排除 → 保守 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x > out.txt 2>/dev/null", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-redirect-token-mixed-reject: cd_redirect_token_mixed_reject", () => {
+  // 反例：`foo>bar` 混合 token（`foo` 是真实位置参数），不命中判据 → 保守 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x && ls foo>bar", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-redirect-token-amp-reject: cd_redirect_token_amp_reject", () => {
+  // 已知边界：`&>log` 不命中判据（`&` 非标准操作符），保守 cd_chdir。
+  // extractRedirects 不识别 `&>` 操作符，待后续独立 change。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x &>log", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-redirect-token-heredoc-reject: cd_redirect_token_heredoc_reject", () => {
+  // 纯 heredoc：`<<EOF` 不命中判据（`<<` 前缀不跳过），且无绝对 ref。
+  // 实测：实际 reason 为 heredoc（scanUnreliable 在 cd 守卫之前拦截），
+  // 与 cd_chdir 同为「判不可靠」拦截，安全语义一致。
+  const r = extractBashTargets("cd /etc && cat <<EOF", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.ok(r.reason === "cd_chdir" || r.reason === "heredoc",
+    `expected cd_chdir or heredoc, got ${r.reason}`);
+});
+
+test("BMG-CD-redirect-token-fileword-amp-reject: cd_redirect_token_fileword_amp_reject", () => {
+  // 架构 review critical：`>&rel.txt` 是文件词 fd 复制（等价 `>rel.txt 2>&1`），
+  // 扫描对 `>&` 一律 continue 不提取其文件目标；跳过会丢失写目标 → 静默放行。
+  // 故不命中判据，保持保守 cd_chdir（与现状一致）。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x >&rel.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BMG-CD-redirect-token-fd-fileword-reject: cd_redirect_token_fd_fileword_reject", () => {
+  // 架构 review critical：`2>&rel.txt` 文件词 fd 复制，`2>&` 分支 continue 不提取
+  // 文件目标；不命中判据 → 保守 cd_chdir（与现状一致）。
+  const r = extractBashTargets("cd /tmp/x && ls /tmp/x 2>&rel.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});

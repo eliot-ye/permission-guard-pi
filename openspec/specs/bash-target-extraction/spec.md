@@ -1776,6 +1776,29 @@ type ExtractResult =
 
 ### Requirement: cd cwd 变更判不可靠
 
+**重定向 token 的位置参数收集细化（本 change 新增）**：cd 跟踪豁免与全绝对下游豁免的路径引用判定（`collectStagePathRefs`）MUST NOT 把「重定向形态 token」当位置参数收集——`tokenize` 不拆分 `2>/dev/null`、`>foo`、`>>foo`、`2>&1`、`<in`、`<<EOF` 等形态（实测 `tokenize("ls /abs/x 2>/dev/null")` → `["ls","/abs/x","2>/dev/null"]`），而重定向目标已由 `collectStagePathRefs` 末尾的重定向扫描单独提取（`>`/`>>`/`2>`/`2>>`/`2>&`/`<`/`<<` 逐字符扫描并提取 target）。位置参数循环对这些 token 的重复收集是多余且有害的——它把 `2>/dev/null` 整串当非绝对引用（`looksLikePath("2>/dev/null")` 为 false），使 D2a 条件 9「不可提取裸词排除」与 D2b「全部路径引用绝对」双双命中，导致 `cd <绝对> && ls <绝对路径> 2>/dev/null` 这类纯 `&&` 链 + 全绝对下游命令误判 `cd_chdir` 弹窗，违反「全绝对下游豁免」既有契约。
+
+**重定向 token 的识别判据**：仅跳过「目标已由重定向扫描提取」或「确无文件目标」的形态，**逐项对齐扫描的实际提取覆盖**：
+
+- **纯数字 fd 复制/关闭**——`/^[0-9]*>&(?:[0-9]+|-)$/`（`2>&1`、`>&2`、`2>&3`、`2>&-`）。扫描对 `>&` 一律 `continue`（无文件目标），跳过无碍。
+- **文件重定向**——`/^[0-9]*(?:>>|>|<).+/` 且不含 `&` 且非 `<<` 前缀（`1>`、`2>`、`3>`、`>`、`>>`、`1>>`、`<`）。扫描逐字符推进到 `>`/`<` 处识别并提取其后目标（`N>` 的 `N` 被当普通字符跳过，`>` 处仍识别并提取目标）。**`.+` 要求操作符后至少一个字符**：`>&file`/`2>&file` 经 `splitCommands` 在 `&` 处拆分会产生裸 `>`/`2>`（如 "ls /tmp/x >"），裸操作符不匹配 `. +` → 不跳过（被收集为不可提取裸词 → 条件 9 排除，保守 cd_chdir）；若不带 `. +`，裸 `>` 被跳过 → `>&rel.txt` 的写目标 `rel.txt` 完全丢失 → D2b 豁免成立 → **静默放行写相对目标**（安全洞，架构 review critical 修复的关键判据）。
+
+**不命中（不跳过，保持收集 → 保守 cd_chdir，与现状一致）**，以下三类：
+
+- `>&file` / `2>&file` / `N>&file`（**文件词 fd 复制**，等价 `>file 2>&1`）——扫描对 `>&` 一律 `continue` 不提取其文件目标；跳过会丢失写目标 → cd 豁免成立 → **静默放行相对写目标**（安全洞，架构 review critical 修复）。保持收集，`looksLikePath(">&rel.txt")` 为 true（`.txt` 后缀）但仍被收集为相对 ref → D2b `hasCwdRelativePathRef` 命中 → 保守 `cd_chdir`（现状不变，安全）。
+- `&>` / `&>>`（如 `&>log`）——不以标准操作符开头（`&` 非数字、非 `>`/`<`），不命中判据，保持收集。`collectStagePathRefs` 重定向扫描对 `&>log` 兜底：`&` 被当普通字符跳过、`>` 处识别并提取 `log` 为相对 ref → D2b `hasCwdRelativePathRef` / D2a 条件 9 拒绝 → 保守 `cd_chdir`（安全，即使不跳过也不会静默放行）。但 `extractRedirects`（真实 target 提取）**不识别** `&>` 操作符（操作符列表无 `&>`），故 `log` 写目标不进 targets——此为**已知边界**，待后续独立 change 扩展 extractRedirects 识别 `&>`。本判据不跳过（保持收集 + 扫描兜底），现状保守弹窗不变。
+- `foo>bar`（位置参数 + 重定向混合 token）——`foo` 是真实位置参数，不以操作符开头，不命中。`looksLikePath("foo>bar")` 为 false → D2a 条件 9 / D2b 排除 → 维持 `cd_chdir`（现状不变）。
+
+**跳过安全论证**：跳过的 token 其重定向目标已由重定向扫描提取为 ref，各形态结论：
+
+- `2>/dev/null` → 扫描提取 `/dev/null`（绝对，`isExplicitAbsolutePath` 为 true，不构成 D2b 障碍；`/dev/*` 在 extractRedirects 写分支被静默跳过，不加入 targets）→ 无碍。
+- `1>rel.txt` / `3>rel.txt` / `2>rel.txt` → 扫描提取 `rel.txt`（有扩展名 → `looksLikePath=true`，条件 9 不触发）。该形态在 cd 链下走 **D2a（cd-tracking）豁免成立**：`rel.txt` 经 `resolveBase` 解析为 post-cd 写目标（`reliable:true`，写目标提取），与现状一致（实测现状 `1>rel.txt`/`3>rel.txt`/`2>rel.txt` 均已 `reliable:true` 且 `rel.txt` 被提取为 write target）——本判据不改变其行为，仅消除「无扩展名目标（如 `2>/dev/null`）依赖 `looksLikePath` 碰巧」的不稳定性。
+- `>foo` / `<in` → 扫描提取 `foo`/`in`（相对，`hasCwdRelativePathRef` 命中 → D2b 排除；D2a 条件 9 `looksLikePath` 为 false）→ 保守弹窗，正确。
+- `2>&1` → fd 复制，重定向扫描明确跳过 → 无 ref → 无碍。
+- `<<EOF` → heredoc 形态（`splitCommands` 可能拆分其内容为独立片段，本判据不跳过 `<<` 前缀——保守维持现状 cd_chdir）。
+
+**`2>>/abs/err.log` 稳定性说明**：该形态现状碰巧放行（`.log` 后缀使 `looksLikePath` 为 true，不触发条件 9），但依赖扩展名碰巧命中而非语义判据——`2>>/tmp/x`（无扩展名）又弹。本 change 使此类 token 统一按重定向形态跳过，写目标由扫描提取为绝对 ref（不构成障碍），行为稳定。
+
 若 bash 命令为复合命令（以 `;`、`&&`、`||`、`&` 或换行分隔），且任一复合命令片段的第一个 token（basename，去掉路径前缀）为 `cd`，系统 MUST 判定整条命令为不可靠，reason 为 `cd_chdir`——**除非满足「cd 跟踪豁免」或「全绝对下游豁免」（见下方两条豁免）**。
 
 单命令形式的 `cd`（不含 `;`、`&&`、`||`、`&` 或换行分隔符）MUST NOT 触发此规则——`cd /etc` 单独执行不产生文件访问，可静默放行。
@@ -2205,3 +2228,53 @@ type ExtractResult =
 
 - **WHEN** bash 命令为 `cd /etc && shred /tmp/a.txt`，projectRoot 为 `/proj`
 - **THEN** 提取结果为 `{ reliable: true }`——绝对路径覆写目标不依赖 cwd，全绝对下游豁免（D2b）成立。**防过度修复对照**：绝对路径覆写目标不误伤
+
+#### Scenario: cd 后绝对路径命令含重定向 token 豁免（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x 2>/dev/null`
+- **THEN** 不判 `cd_chdir`（全绝对下游豁免成立——`2>/dev/null` 是重定向 token，不构成位置参数；`/tmp/x` 位置参数与 `/dev/null` 重定向目标均绝对），提取结果 `reliable: true`，targets 含 `/tmp/x`（读）
+
+#### Scenario: cd 后绝对路径命令含 fd 复制重定向 token 豁免（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && cat /tmp/x/file.txt 2>&1 | head`
+- **THEN** 不判 `cd_chdir`（`2>&1` 是 fd 复制，非文件引用；`/tmp/x/file.txt` 绝对；cd 跟踪豁免逐 stage 检查通过），提取结果 `reliable: true`
+
+#### Scenario: cd 后绝对路径命令含绝对写重定向豁免（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x 2>>/tmp/err.log`
+- **THEN** 不判 `cd_chdir`（`2>>` 目标 `/tmp/err.log` 绝对，重定向扫描提取；`/tmp/x` 位置参数绝对——全绝对下游豁免成立），提取结果 `reliable: true`，targets 含 `/tmp/x`（读）与 `/tmp/err.log`（写）
+
+#### Scenario: cd 后相对路径引用伴重定向 token 仍判不可靠（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls sub 2>/dev/null`
+- **THEN** 判 `cd_chdir`（`sub` 是真实相对位置参数，非重定向 token，仍收集；`looksLikePath("sub")` 为 false → D2a 条件 9 / D2b 排除，豁免不成立）
+
+#### Scenario: cd 后相对重定向写目标伴重定向 token 仍判不可靠（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x > out.txt 2>/dev/null`
+- **THEN** 判 `cd_chdir`（重定向扫描提取 `out.txt` 相对写目标 → `hasCwdRelativePathRef` 命中 → D2b 排除；D2a 条件 9 `looksLikePath("out.txt")` 为 true 不触发但条件 4 `containsCwdAnchor` 不命中、D2b 排除成立；`2>/dev/null` 重定向 token 跳过不影响 `out.txt` 相对性判定）
+
+#### Scenario: cd 后混合位置参数与重定向 token 仍判不可靠（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls foo>bar`
+- **THEN** 判 `cd_chdir`（`foo>bar` 不以操作符开头，不命中重定向 token 判据，仍收集；`looksLikePath("foo>bar")` 为 false → D2a 条件 9 / D2b 排除）
+
+#### Scenario: cd 后 &> 重定向仍判不可靠（已知边界，本 change 新增）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x &>log`
+- **THEN** 判 `cd_chdir`（`&>log` 不以标准操作符开头，不命中重定向 token 判据，仍收集；`looksLikePath("&>log")` 为 false → 保守排除；重定向扫描不覆盖 `&>` 写目标，待后续独立 change 处理——本 scenario 固定现状保守行为）
+
+#### Scenario: cd 后文件词 fd 复制重定向仍判不可靠（本 change 新增，架构 review critical 修复）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x >&rel.txt`
+- **THEN** 判 `cd_chdir`（`>&rel.txt` 是文件词 fd 复制，等价 `>rel.txt 2>&1`；扫描对 `>&` 一律 `continue` 不提取其文件目标——若跳过会丢失写目标 `rel.txt` → cd 豁免静默放行写 `/tmp/x/rel.txt`，安全洞。故不命中重定向 token 判据，保持收集；`rel.txt` 由 `looksLikePath` 判定为可提取相对路径但 `>&rel.txt` 整 token 被收集为相对 ref → D2b `hasCwdRelativePathRef` 命中 → 保守 `cd_chdir`，与现状一致）
+
+#### Scenario: cd 后数字 fd 文件词重定向仍判不可靠（本 change 新增，架构 review critical 修复）
+
+- **WHEN** bash 命令为 `cd /tmp/x && ls /tmp/x 2>&rel.txt`
+- **THEN** 判 `cd_chdir`（`2>&rel.txt` 是文件词 fd 复制，等价 `>rel.txt 2>&1`；扫描对 `2>&` 分支 `continue` 不提取其文件目标——跳过会丢失写目标 → cd 豁免静默放行。故不命中重定向 token 判据，保持收集；`looksLikePath("2>&rel.txt")` 为 true（`.txt` 后缀）但被收集为相对 ref → D2b 排除 → 保守 `cd_chdir`，与现状一致）
+
+#### Scenario: cd 后无路径引用纯 heredoc 仍判不可靠（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /etc && cat <<EOF`
+- **THEN** 判不可靠（`<<EOF` 是 heredoc 重定向 token，不命中判据保持收集；无任何绝对路径引用 → D2b 条件 1 `anyAbsRef` 为 false → 豁免不适用。实测：实际 reason 为 `heredoc`——由 scanUnreliable 在 cd 守卫之前拦截，与 `cd_chdir` 同为「判不可靠」拦截，安全语义一致；属守卫链顺序实现细节，两 reason 均可接受）
