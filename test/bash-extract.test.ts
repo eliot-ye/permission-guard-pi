@@ -4406,3 +4406,204 @@ test("BMG-CD-redirect-token-fd-fileword-reject: cd_redirect_token_fd_fileword_re
   assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
   if (!r.reliable) assert.equal(r.reason, "cd_chdir");
 });
+
+// -------- sed 只读豁免（bash-sed-readonly-exempt） --------
+// 契约来源：specs/bash-target-extraction/spec.md「sed 只读豁免」requirement +
+// proposal 预期行为模型。期望从契约推导（非反抄实现）。
+
+test("BT-SED-1: sed_n_readonly_extracts_read_target", () => {
+  // `sed` 只读形态提取路径（支持的文件读取命令 MODIFIED）
+  const r = extractBashTargets("sed -n '335,345p' test/decision.test.ts", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/proj/test/decision.test.ts" && t.action === "read"),
+      `expected read target /proj/test/decision.test.ts, got ${JSON.stringify(r.targets)}`);
+  }
+});
+
+test("BT-SED-2a: sed_n_readonly_form_reliable", () => {
+  // sed 只读形态（-n）放行
+  const r = extractBashTargets("sed -n '335,345p' test/decision.test.ts", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-SED-2b: sed_no_n_stdout_read_reliable", () => {
+  // sed 无 -n 标准输出读放行
+  const r = extractBashTargets("sed '1,5p' file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/proj/file.txt" && t.action === "read"),
+      `expected read target /proj/file.txt, got ${JSON.stringify(r.targets)}`);
+  }
+});
+
+test("BT-SED-3: sed_i_write_form_unreliable", () => {
+  // sed -i 写形态保留弹窗
+  const r = extractBashTargets("sed -i 's/a/b/' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-4: sed_script_w_write_cmd_unreliable", () => {
+  // sed 脚本含 w 写命令保留弹窗
+  const r = extractBashTargets("sed '1,5w /etc/passwd' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-5: sed_script_e_exec_cmd_unreliable", () => {
+  // sed 脚本含 e 执行命令保留弹窗
+  const r = extractBashTargets("sed 'e ls' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-6: sed_readonly_pipeline_reliable", () => {
+  // sed 只读形态 + 管道下游只读放行
+  const r = extractBashTargets("sed -n '1,5p' file.txt | grep x", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-SED-7: sed_command_substitution_unreliable", () => {
+  // sed 含命令替换保留弹窗（scanUnreliable 先行拦截 → command_substitution）
+  const r = extractBashTargets('sed "s/$(date)/x/" file.txt', "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-SED-8: sed_script_r_read_cmd_unreliable", () => {
+  // sed 脚本含 r 读文件命令保留弹窗（CRITICAL-1）
+  const r = extractBashTargets("sed '1r /etc/shadow' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-9: sed_script_R_read_cmd_unreliable", () => {
+  // sed 脚本含 R 读文件命令保留弹窗
+  const r = extractBashTargets("sed '1R /etc/shadow' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-10: sed_replace_flag_e_unreliable", () => {
+  // sed 替换式 flag e 执行保留弹窗
+  const r = extractBashTargets("sed 's/foo/bar/e' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-11: sed_replace_flag_w_unreliable", () => {
+  // sed 替换式 flag w 写文件保留弹窗
+  const r = extractBashTargets("sed 's/foo/bar/w /etc/passwd' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-12: sed_script_ab_extracts_only_positional", () => {
+  // 设计 D2 专项：脚本 `a.b` 不被误判为路径，只提取位置参数 file.txt
+  const r = extractBashTargets("sed 'a.b' file.txt", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/proj/file.txt" && t.action === "read"),
+      `expected read target /proj/file.txt, got ${JSON.stringify(r.targets)}`);
+    // 脚本 `a.b` 不应被误收集为路径
+    assert.ok(!r.targets.some((t) => t.path === "/proj/a.b"),
+      `expected no /proj/a.b phantom target, got ${JSON.stringify(r.targets)}`);
+  }
+});
+
+test("BT-SED-13: awk_readonly_form_unreliable", () => {
+  // awk 只读形式保持弹窗（非目标）
+  const r = extractBashTargets("awk 'NR==1{print}' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-14: sed_i_suffix_write_form_unreliable", () => {
+  // sed -i 后缀写形态保留弹窗（CRITICAL-2）
+  const r = extractBashTargets("sed -i.bak 's/a/b/' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-15: sed_multi_e_script_r_unreliable", () => {
+  // sed 多 -e 第二脚本 r 保留弹窗（CRITICAL-3）
+  const r = extractBashTargets("sed -e '1,5p' -e 'r /etc/shadow' file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-16: sed_f_scriptfile_unreliable", () => {
+  // sed -f 脚本文件保留弹窗（CRITICAL-4）
+  const r = extractBashTargets("sed -f script.txt file.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BT-SED-17: sed_common_readonly_forms_not_misjudged", () => {
+  // 判据"判定不误伤"例证：常见只读形态不误伤
+  for (const cmd of [
+    "sed -e '1,5p' file.txt",
+    "sed -n '/error/p' file.txt",
+    "sed 'y/abc/rwx/' file.txt",
+    "sed -e '1,5p' -e 's/a/b/' file.txt",
+    "sed '1,5d' file.txt",
+    "sed 's/foo/bar/' file.txt",
+  ]) {
+    const r = extractBashTargets(cmd, "/proj");
+    assert.equal(r.reliable, true, `expected reliable for ${cmd}, got ${JSON.stringify(r)}`);
+  }
+});
+
+test("BT-SED-18: sed_pipeline_downstream_unreliable_rejected", () => {
+  // 变更级收尾 review Issue #1：管道下游 UNRELIABLE 脚本解释器不得被 sed
+  // 豁免覆盖（spec 非目标：awk/perl/python 不适用本豁免）。
+  for (const cmd of [
+    "sed -n '1,5p' file.txt | perl -e 'do q{x}'",
+    "sed -n '1,5p' file.txt | node -e 'console.log(1)'",
+    "sed -n '1,5p' file.txt | awk 'NR==1{print}'",
+  ]) {
+    const r = extractBashTargets(cmd, "/proj");
+    assert.equal(r.reliable, false, `expected unreliable for ${cmd}, got ${JSON.stringify(r)}`);
+    if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+  }
+});
+
+test("BT-SED-19: sed_noclobber_redirect_rejected", () => {
+  // 变更级收尾 review Issue #2：`>|`/`2>|`（noclobber 覆盖写）是合法 bash
+  // 写形式，extractRedirects 漏检——sed 豁免判据须显式识别。
+  for (const cmd of [
+    "sed -n '1,5p' file.txt >| out.txt",
+    "sed -n '1,5p' file.txt 2>| err.txt",
+  ]) {
+    const r = extractBashTargets(cmd, "/proj");
+    assert.equal(r.reliable, false, `expected unreliable for ${cmd}, got ${JSON.stringify(r)}`);
+    if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+  }
+});
+
+test("BT-SED-20: sed_wrapper_prefix_readonly", () => {
+  // 变更级收尾 review Issue #4：env/command 包裹的只读 sed 形态应放行
+  // （与 isAnyUnreliableCommand 的 skipWrapperTokens 行为一致）。
+  const r1 = extractBashTargets("env FOO=1 sed -n '1,5p' file.txt", "/proj");
+  assert.equal(r1.reliable, true, `expected reliable, got ${JSON.stringify(r1)}`);
+  const r2 = extractBashTargets("command sed -n '1,5p' file.txt", "/proj");
+  assert.equal(r2.reliable, true, `expected reliable, got ${JSON.stringify(r2)}`);
+  // env 包裹写形态仍拒绝。
+  const r3 = extractBashTargets("env FOO=1 sed -i 's/a/b/' file.txt", "/proj");
+  assert.equal(r3.reliable, false, `expected unreliable, got ${JSON.stringify(r3)}`);
+  if (!r3.reliable) assert.equal(r3.reason, "unreliable_command");
+});
+
+test("BT-SED-21: sed_escaped_delimiter_replace_safe", () => {
+  // 变更级收尾 review Issue #3 对齐：`s/a\/b/c/`（替换式中 `\/` 转义定界，
+  // `/` 为字面量）是纯只读替换，正确判安全；定界不完整（缺结尾 `/`）
+  // 保守判不豁免。
+  const r1 = extractBashTargets("sed -n 's/a\\/b/c/' file.txt", "/proj");
+  assert.equal(r1.reliable, true, `expected reliable, got ${JSON.stringify(r1)}`);
+  const r2 = extractBashTargets("sed -n 's/foo\\/bar\\/baz/x/' file.txt", "/proj");
+  assert.equal(r2.reliable, true, `expected reliable, got ${JSON.stringify(r2)}`);
+  // 转义替换 + 写重定向仍拒绝。
+  const r3 = extractBashTargets("sed -n 's/a\\/b/c/' file.txt > out.txt", "/proj");
+  assert.equal(r3.reliable, false, `expected unreliable, got ${JSON.stringify(r3)}`);
+  if (!r3.reliable) assert.equal(r3.reason, "unreliable_command");
+});

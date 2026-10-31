@@ -1,7 +1,8 @@
 // Bash extraction: silent commands + dev-tool read-only subcommand detection.
 // Pure module — no IO / no side effects.
 
-import { splitCommands, tokenize } from "./parse.ts";
+import { splitCommands, splitPipelines, tokenize, extractRedirects } from "./parse.ts";
+import type { ExtractAction } from "./parse.ts";
 import { isReadOnlyWithArgs } from "./readonly.ts";
 import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
 import { SHELL_WRAPPER_NAMES, skipWrapperTokens } from "./shell-forwarder.ts";
@@ -643,6 +644,239 @@ export function isSilentCommand(cmdName: string, tokens: string[]): boolean {
   // Change B: `npm run` must be followed by a whitelisted script name.
   if (subcommandSeen === "__run_form__") return false;
   return true;
+}
+
+// -------- sed 只读豁免（bash-sed-readonly-exempt） --------
+//
+// sed 在 UNRELIABLE_COMMANDS（命令名精确匹配即判 unreliable_command），但
+// 确定只读的窄形态不应被兜底弹窗拦截。isSedReadonlyForm 判定该窄形态：
+//
+// 判据（spec「sed 只读豁免」requirement，5 条件全部满足才豁免）：
+//   1. 无 `-i` 前缀短 flag / 含 `i` 的短 option cluster / `--in-place`
+//   2. 无 `-f` 前缀短 flag / 含 `f` 的短 option cluster / `--file`
+//   3. 每个 sed 脚本（所有 `-e`/`--expression` 值 + 首个非 flag 位置参数）
+//      移除分隔符定界形式（替换式 s/RE/REP/、transliteration y/src/dst/、
+//      正则地址 /RE/）后不含 r/R/w/W/e/E 任一命令字符
+//   4. 无写重定向
+//   5. 无命令替换——由 scanUnreliable（entry.ts 步骤 1）先行拦截，此处
+//      不重复检测（design D4；只读命令替换无副作用，可安全放行）
+//
+// 任一条件不满足 → 不豁免（保持 unreliable_command，读任意文件/写/执行
+// 形态保留弹窗）。
+
+/**
+ * 移除 sed 脚本中的"分隔符定界形式"（替换式 `s/RE/REP/`、transliteration
+ * `y/src/dst/`、正则地址 `/RE/`），返回剩余"命令位置"文本。RE/REP/src/dst
+ * 内未转义 `/` 为定界符；内含转义 `\/` 时保守返回 null（判不豁免——宁保守
+ * 弹窗不误放行）。只移除定界形式本身，不含替换式 flag 之后的文本（flag
+ * `e`/`w`/`W` 落在命令位置检测范围）。
+ */
+function stripSedDelimited(script: string): string | null {
+  let rest = script;
+  // 逐字符找 `<prefixChar>/.../.../` 形式（s 或 y），含转义 `\/` 保守。
+  const removeOne = (s: string, prefixChar: string): { rest: string; ok: boolean } => {
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === prefixChar && s[i + 1] === "/") {
+        let slashCount = 0;
+        for (let j = i + 2; j < s.length; j++) {
+          if (s[j] === "\\") {
+            // 转义字符：跳过下一个（转义 `/` 是字面量，不计入定界）。
+            j += 1;
+            continue;
+          }
+          if (s[j] === "/") {
+            slashCount += 1;
+            if (slashCount === 2) {
+              // 找到完整定界形式：移除 `s/.../.../`（不含 flag 之后文本）。
+              return { rest: s.slice(0, i) + s.slice(j + 1), ok: true };
+            }
+          }
+        }
+        // 只找到一个 `/` 或含转义 → 定界形式不完整，保守不移除。
+        return { rest: s, ok: false };
+      }
+    }
+    return { rest: s, ok: true };
+  };
+  // 循环移除全部替换式 s/.../.../ 形式。
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const r = removeOne(rest, "s");
+    if (r.ok && r.rest !== rest) {
+      rest = r.rest;
+      changed = true;
+    } else if (!r.ok) {
+      return null;
+    }
+  }
+  // 循环移除全部 transliteration y/.../.../ 形式。
+  changed = true;
+  while (changed) {
+    changed = false;
+    const r = removeOne(rest, "y");
+    if (r.ok && r.rest !== rest) {
+      rest = r.rest;
+      changed = true;
+    } else if (!r.ok) {
+      return null;
+    }
+  }
+  return rest;
+}
+
+/** 移除剩余文本中的正则地址 `/RE/` 形式（含转义 `\/` 保守）。 */
+function stripSedRegexAddresses(script: string): string {
+  let rest = script;
+  // 移除 /RE/ 形式（RE 内未转义 / 为定界；含转义 `\/` 时该形式不被完整
+  // 匹配 → 保守：剩余 `/` 触发命令位置危险判定）。
+  const re = /\/[^/\\]*(?:\\.[^/\\]*)*\//g;
+  rest = rest.replace(re, "");
+  return rest;
+}
+
+/**
+ * 判断单个 sed 脚本是否含危险命令字符（r/R/w/W/e/E，任一命中即不豁免）。
+ * 移除分隔符定界形式后检测剩余命令位置文本。
+ */
+function isDangerousSedScript(script: string): boolean {
+  const rest = stripSedDelimited(script);
+  if (rest === null) return true; // 转义定界不完整 → 保守判不豁免
+  const cleaned = stripSedRegexAddresses(rest);
+  // 若移除正则地址后仍有 `/`（说明含未识别的定界/转义形式）→ 保守判不豁免。
+  if (cleaned.includes("/")) return true;
+  return /[rRwWeE]/.test(cleaned);
+}
+
+/**
+ * 收集 sed 命令的全部脚本来源：所有 `-e`/`--expression` 值 + 首个非 flag
+ * 位置参数（仅当无 `-e`/`-f` 时，即单脚本形态）。`-e` 存在时非 flag 位置
+ * 参数是文件操作数，不是脚本，不收集。
+ */
+function collectSedScripts(flags: string[]): string[] {
+  const scripts: string[] = [];
+  const hasE = flags.some((a) => a === "-e" || a === "--expression" || a.startsWith("--expression="));
+  const hasF = flags.some((a) => a.startsWith("-f") || a.startsWith("--file"));
+  let sawPositional = false;
+  for (let i = 0; i < flags.length; i++) {
+    const t = flags[i];
+    if (t === "-e" || t === "--expression") {
+      if (flags[i + 1]) scripts.push(flags[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (t.startsWith("--expression=")) {
+      scripts.push(t.slice("--expression=".length));
+      continue;
+    }
+    if (t.startsWith("-")) continue;
+    if (!sawPositional) {
+      if (!hasE && !hasF) scripts.push(t);
+      sawPositional = true;
+    }
+  }
+  return scripts;
+}
+
+/**
+ * 引号感知检测 `>|`/`2>|`（noclobber 覆盖写重定向，合法 bash 写形式）。
+ * extractRedirects（parse.ts）对 `>|`/`2>|` 漏检（`>` 分支读到 `|` 即 path
+ * 空而跳过），条件 4 需显式识别——命中即不豁免。引号感知：sed 脚本内的
+ * `|`（如 `s/a|b/c/` 在单引号内）是字面量，不触发。
+ */
+function hasNoclobberRedirect(cmd: string): boolean {
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (escaped) { escaped = false; continue; }
+    if (quote === "'") { if (ch === "'") quote = null; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (quote === '"') { if (ch === '"') quote = null; continue; }
+    if (ch === "'") { quote = "'"; continue; }
+    if (ch === '"') { quote = '"'; continue; }
+    if (ch === ">" && cmd[i + 1] === "|") return true;
+    if (ch === "2" && cmd[i + 1] === ">" && cmd[i + 2] === "|") return true;
+  }
+  return false;
+}
+
+/** 判断 sed 命令是否命中只读豁免判据（5 条件全部满足）。
+ *
+ * 返回 true 当且仅当：命令含至少一个 sed 片段、每个 sed 片段都满足只读
+ * 豁免判据、且不含任何其他 UNRELIABLE_COMMANDS 片段（如 awk 片段仍要
+ * 拒绝——sed 豁免只绕过 sed 自身的 unreliable，不绕过其他 unreliable
+ * 命令）。命令不含任何 sed 片段时返回 false（不是豁免对象）。
+ */
+export function isSedReadonlyForm(rawCommand: string): boolean {
+  const fragments = splitCommands(rawCommand);
+  let sawSed = false;
+  for (const frag of fragments) {
+    if (!frag.trim()) continue;
+    // `>|`/`2>|`（noclobber 覆盖写）在 **fragment 层面**检测——splitPipelines
+    // 会把 `>|` 的 `|` 当 pipeline 分隔符切走，stage 层面只剩 `>`（漏检）。
+    // fragment 层面的引号感知检测命中 `>|`/`2>|` 即不豁免（Issue #2）。
+    if (hasNoclobberRedirect(frag)) return false;
+    // 逐 pipeline stage 检查——`sed ... | perl -e ...` 的 perl 片段是独立
+    // stage，其首命令是 UNRELIABLE 成员时 sed 豁免不覆盖（spec 非目标：
+    // awk/perl/python 等脚本解释器不适用本豁免）。splitCommands 不切 `|`，
+    // 必须在此逐 stage 检查，否则管道下游脚本解释器漏检（鉴权绕过）。
+    const stages = splitPipelines(frag);
+    for (const stage of stages) {
+      const trimmed = stage.trim();
+      if (!trimmed) continue;
+      const tokens = tokenize(trimmed);
+      if (tokens.length === 0) continue;
+      // 展开 wrapper 前缀（env/command/sudo/nohup/timeout/watch/nice）定位
+      // 实际命令——与 isAnyUnreliableCommand 的 skipWrapperTokens 行为一致，
+      // 使 `env FOO=1 sed -n ...` 的只读形态不被误判 unreliable（UX 噪音）。
+      let cmdIdx = 0;
+      let base = tokens[0].split("/").pop()!;
+      while (SHELL_WRAPPER_NAMES.has(base)) {
+        cmdIdx = skipWrapperTokens(tokens, cmdIdx + 1, base);
+        if (cmdIdx >= tokens.length) { base = ""; break; }
+        base = tokens[cmdIdx].split("/").pop()!;
+      }
+      if (base !== "sed") {
+        // 非 sed stage：若其首命令是其他 UNRELIABLE 成员（awk/perl/node 等），
+        // 该 stage 仍不可靠——sed 豁免不覆盖它，返回 false 保持 unreliable。
+        if (UNRELIABLE_COMMANDS.has(base)) return false;
+        continue;
+      }
+      sawSed = true;
+      const flags = tokens.slice(cmdIdx + 1);
+
+      // 条件 1：无 `-i` 前缀短 flag / 含 `i` 的短 cluster / `--in-place`。
+      for (const f of flags) {
+        if (f.startsWith("--in-place")) return false;
+        if (f.startsWith("-i")) return false;
+        if (f.startsWith("-") && !f.startsWith("--") && f.length > 2 && f.includes("i")) return false;
+      }
+      // 条件 2：无 `-f` 前缀短 flag / 含 `f` 的短 cluster / `--file`。
+      for (const f of flags) {
+        if (f.startsWith("--file")) return false;
+        if (f.startsWith("-f")) return false;
+        if (f.startsWith("-") && !f.startsWith("--") && f.length > 2 && f.includes("f")) return false;
+      }
+      // 条件 3：所有脚本移除分隔符定界形式后无危险命令字符。
+      const scripts = collectSedScripts(flags);
+      if (scripts.length === 0) return false; // 无脚本（如 `sed` 裸命令）→ 不豁免
+      for (const s of scripts) {
+        if (isDangerousSedScript(s)) return false;
+      }
+      // 条件 4：无写重定向（`>`/`>>`/`2>`/`2>>` 等写文件重定向）。
+      // 用 extractRedirects 收集写目标——命中写重定向即不豁免。
+      const writeTargets: Array<{ action: ExtractAction; path: string }> = [];
+      extractRedirects(trimmed, writeTargets, "");
+      for (const t of writeTargets) {
+        if (t.action === "write") return false;
+      }
+      // 条件 5：命令替换由 scanUnreliable（entry.ts 步骤 1）先行拦截，
+      // 此处不重复检测（design D4）。只读命令替换（如 $(echo x)）无副作用，
+      // 可安全放行；写/执行命令替换已被 scanUnreliable 拦截。
+    }
+  }
+  return sawSed;
 }
 
 // Check whether any command fragment's first command name is in

@@ -8,7 +8,7 @@ import { scanControlFlow, scanFindWriteFlags } from "./control-flow.ts";
 import { scanUnreliable } from "./scan.ts";
 import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir, shouldTrackCdCwd } from "./shell-forwarder.ts";
 import { toAbsolutePath } from "../path-utils.ts";
-import { GIT_BLOB_OK_SUBCOMMANDS, NPM_RUN_OK_SCRIPTS, SILENT_ALLOW_ALL, SILENT_COMMANDS, isAnyUnreliableCommand, isSilentCommand, isSilentGo, isSilentNpx, isSilentTsc, looksLikeGitBlobToken, looksLikeRepoRelativePath } from "./silent.ts";
+import { GIT_BLOB_OK_SUBCOMMANDS, NPM_RUN_OK_SCRIPTS, SILENT_ALLOW_ALL, SILENT_COMMANDS, isAnyUnreliableCommand, isSedReadonlyForm, isSilentCommand, isSilentGo, isSilentNpx, isSilentTsc, looksLikeGitBlobToken, looksLikeRepoRelativePath } from "./silent.ts";
 import { COMMAND_TABLE } from "./extractors.ts";
 
 export function extractBashTargets(rawCommand: string, projectRoot: string, env: NodeJS.ProcessEnv = process.env): ExtractResult {
@@ -67,12 +67,16 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
   // so `bash -c 'sed -i …'` correctly reports shell_forwarder (the outer
   // shell, not the inner interpreter, is what we can't parse).
   if (isAnyUnreliableCommand(rawCommand)) {
-    // Change C: `npx --no-install <pkg>` is a static-safe form — even
-    // though `npx` is in UNRELIABLE_COMMANDS, this specific form has
-    // no network access (npm CLI's `--no-install` guarantees local-
-    // package-only execution). Skip the UNRELIABLE_COMMANDS rejection
-    // for npx iff isSilentNpx passes.
-    if (!(SILENT_COMMANDS["npx"] && isSilentNpx(tokenize(rawCommand).slice(1)))) {
+    // bash-sed-readonly-exempt: sed 只读窄形态豁免。sed 在 UNRELIABLE_COMMANDS
+    // 命令名精确匹配即判 unreliable，但确定只读的窄形态（无 -i/-f、脚本无
+    // r/R/w/W/e/E 命令字符、无写重定向）访问目标静态可确定，不该走兜底弹窗。
+    // isSedReadonlyForm 内部逐 fragment 判定，返回 true 当且仅当所有 sed
+    // 片段都满足只读判据——此时跳过 4a 的 unreliable 拒绝，落到正常提取流程。
+    // 写/执行/读任意文件形态（-i/-i.bak/多-e r/-f/s///e/s///w/r /etc/shadow）
+    // 判据不满足，保持 unreliable_command。
+    if (isSedReadonlyForm(rawCommand)) {
+      // 全部 sed 片段豁免成立 → 跳过 4a 拒绝，落到步骤 4b 与逐 stage 提取。
+    } else if (!(SILENT_COMMANDS["npx"] && isSilentNpx(tokenize(rawCommand).slice(1)))) {
       return { reliable: false, rawCommand, reason: "unreliable_command" };
     }
     // npx --no-install silent form — proceed to 4b (which will also

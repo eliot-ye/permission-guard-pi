@@ -73,6 +73,39 @@ export const readExtract: Extractor = (tokens, targets, root) => {
   }
 };
 
+// Extract target paths from `sed` (bash-sed-readonly-exempt, D2). Only reached
+// when the sed read-only exemption holds (write/exec forms are intercepted by
+// entry.ts step 4a before reaching COMMAND_TABLE). Skips ALL script sources
+// (each `-e`/`--expression` value, `-f`/`--file` value, and the first non-flag
+// positional when neither `-e` nor `-f` is present) plus `-n`; remaining
+// non-flag positionals that look like paths become read targets.
+//
+// Deliberately does NOT reuse `readExtract`: the sed script (e.g. `a.b`) can
+// look like a path (looksLikePath("a.b") === true) and readExtract would
+// mis-collect it as a read target. The script argument is not a file path and
+// must be explicitly skipped.
+
+export const sedExtract: Extractor = (tokens, targets, root) => {
+  const args = tokens.slice(1);
+  const hasE = args.some((a) => a === "-e" || a === "--expression" || a.startsWith("--expression="));
+  const hasF = args.some((a) => a.startsWith("-f") || a.startsWith("--file"));
+  let sawScript = false;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === "-e" || t === "--expression") { i += 1; continue; }
+    if (t.startsWith("--expression=")) continue;
+    if (t === "-f" || t === "--file") { i += 1; continue; }
+    if (t.startsWith("--file=")) continue;
+    if (t.startsWith("-")) continue; // -n and other flags
+    // First non-flag positional is the script ONLY when neither `-e` nor `-f`
+    // is present; otherwise it is a file operand.
+    if (!hasE && !hasF && !sawScript) { sawScript = true; continue; }
+    if (looksLikePath(t)) {
+      targets.push({ action: "read", path: toAbsolutePath(expandHome(t), root) });
+    }
+  }
+};
+
 // Extract target paths from `mkdir`. Every non-flag arg is a directory
 // to be created - classify as write.
 
@@ -279,6 +312,11 @@ export const COMMAND_TABLE: Record<string, Extractor> = {
   install: installExtract,
   mkdir: mkdirExtract,
   touch: touchExtract,
+  // sed: read-only form exemption (bash-sed-readonly-exempt). Only reached
+  // when entry.ts step 4a's sed exemption holds (write/exec forms are
+  // intercepted there as unreliable_command). `sedExtract` skips all script
+  // sources and collects file positionals as read targets.
+  sed: sedExtract,
 };
 
 // -------- Meta commands: control flow + shell forwarders --------
