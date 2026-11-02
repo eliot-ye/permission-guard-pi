@@ -3,7 +3,7 @@
 
 import { toAbsolutePath, isInside } from "../path-utils.ts";
 
-import { splitCommands, splitPipelines, tokenize } from "./parse.ts";
+import { splitCommands, splitPipelines, tokenize, looksLikePath } from "./parse.ts";
 import { isForBodyReadOnly, HARMLESS_BUILTINS } from "./silent.ts";
 
 export const READ_ONLY_COMMANDS = new Set([
@@ -342,8 +342,10 @@ export function isForLoopIterationGlobExempt(
   // Parse the for-loop structure from position j-3.
   let pos = j; // `pos` is at `for` + 3 (skip `for`)
   while (pos < cmd.length && /\s/.test(cmd[pos])) pos++;
-  // Skip VAR.
+  // Capture VAR name (before skipping it).
+  const varStart = pos;
   while (pos < cmd.length && !/\s/.test(cmd[pos])) pos++;
+  const forVarName = cmd.slice(varStart, pos);
   while (pos < cmd.length && /\s/.test(cmd[pos])) pos++;
   // Skip `in`.
   if (cmd.slice(pos, pos + 2) !== "in") return false;
@@ -436,7 +438,11 @@ export function isForLoopIterationGlobExempt(
   const body = cmd.slice(bodyStart, donePos);
 
   // Check body is read-only.
-  if (!isForBodyReadOnly(body)) return false;
+  // Pass the for-loop context (iteration variable name + bounded=true,
+  // since this function already verified the glob prefix is inside
+  // projectRoot) so the body's assignment forms with `$(...)` can be
+  // exempted via isForBodySubstitutionExempt (B1-B4).
+  if (!isForBodyReadOnly(body, { varName: forVarName, bounded: true }, projectRoot)) return false;
 
   // Extract the glob's prefix: the chars from the start of the current token
   // up to (but not including) the glob char. The token starts at the
@@ -469,6 +475,107 @@ export function isForLoopIterationGlobExempt(
 
   // Check prefix is inside projectRoot.
   if (!isBoundedPrefix(prefix, projectRoot)) return false;
+
+  return true;
+}
+
+// -------- For-body iteration-variable substitution exemption (B1-B4) --------
+
+// For-loop context: iteration variable name + whether the iteration set is
+// bounded-safe (literal words, or a glob whose prefix is fully inside
+// projectRoot). Reused by isForBodyReadOnly (silent.ts) and scanUnreliable
+// (scan.ts) via the shared isForBodySubstitutionExempt predicate.
+export interface ForLoopContext {
+  /** The loop variable name (e.g. `f` for `for f in ...`). */
+  varName: string;
+  /** True when the iteration set is bounded-safe: literal words only, or a
+   *  glob whose prefixes are all empty or inside projectRoot. */
+  bounded: boolean;
+}
+
+/**
+ * Check whether a `$(...)` command substitution inside a for-loop body is
+ * safe to exempt from `command_substitution` rejection (for-body
+ * iteration-variable binding exemption, B1-B4).
+ *
+ * This is a PARALLEL predicate to the existing SUBSTITUTION_READONLY_CMDS
+ * whitelist (see isSubstitutionReadOnlyAt in scan.ts) — it does NOT change
+ * the whitelist. It only applies when the `$()` is in a for-loop body whose
+ * path arguments are statically bound to the iteration variable.
+ *
+ * B1 command read-only: inner top-level command is in READ_ONLY_COMMANDS or
+ *   HARMLESS_BUILTINS, or is `find` passing the per-argument read-only check.
+ * B2 path-argument binding: every non-flag path argument is either the for
+ *   iteration variable (`"$f"` / `$f`) or a project-inner literal path (no
+ *   `$`, unquoted glob, backtick, or `..` escape). Unbound `$VAR` / unquoted
+ *   glob → reject (fail-closed).
+ * B3 iteration set bounded: forCtx.bounded (literal words or in-project glob).
+ * B4 no other side-effect constructs: no redirect, pipe, `&&`/`;`/`&`,
+ *   backtick, unquoted heredoc, or subshell inside the `$()`.
+ *
+ * The `$()` content is `inner` (text between `$(` and its matching `)`).
+ * `projectRoot` anchors project-inner literal path checks.
+ */
+export function isForBodySubstitutionExempt(
+  inner: string,
+  forCtx: ForLoopContext | null,
+  projectRoot: string,
+): boolean {
+  // B3: no for-loop context → not exempt (top-level `$(grep ...)` stays
+  // rejected, preserving the security boundary).
+  if (!forCtx) return false;
+  if (!forCtx.bounded) return false;
+
+  // --- B1: inner top-level command read-only ---
+  const trimmed = inner.trim();
+  if (!trimmed) return false;
+  let cmdStart = 0;
+  while (cmdStart < trimmed.length && /\s/.test(trimmed[cmdStart])) cmdStart += 1;
+  let cmdEnd = cmdStart;
+  while (cmdEnd < trimmed.length && !/\s/.test(trimmed[cmdEnd])) cmdEnd += 1;
+  const rawCmd = trimmed.slice(cmdStart, cmdEnd);
+  if (!rawCmd) return false;
+  const cmdName = rawCmd.includes("/") ? rawCmd.split("/").pop()! : rawCmd;
+  const argTokens = tokenize(trimmed.slice(cmdEnd));
+  if (!isReadOnlyWithArgs(cmdName, argTokens) && !HARMLESS_BUILTINS.has(cmdName)) {
+    return false;
+  }
+
+  // --- B2: path-argument binding ---
+  // Every non-flag argument (the iteration variable or a project-inner
+  // literal path) must be statically bound. Flags (`-c`, `--...`) are
+  // allowed as-is. Pattern strings are treated conservatively: a pattern
+  // containing an unbound `$` or unquoted glob is rejected (fail-closed),
+  // even if it is semantically a regex pattern rather than a path.
+  for (const arg of argTokens) {
+    if (arg.startsWith("-")) continue;
+    // The iteration variable, possibly quoted: `$f` or `"$f"`.
+    if (arg === `$${forCtx.varName}` || arg === `"$${forCtx.varName}"` || arg === `'$${forCtx.varName}'`) {
+      continue;
+    }
+    // Unbound `$` reference (not the iteration variable) → reject.
+    if (/\$/.test(arg)) return false;
+    // Unquoted glob / backtick → reject (B2/B4).
+    if (/[*?[]/.test(arg) || arg.includes("`")) return false;
+    // `..` traversal segment → reject unconditionally (fail-closed), even
+    // when the arg does not "look like" a path (e.g. `x/../../etc/passwd`
+    // has no leading `/`, `~`, `./`, `../` and no dot extension, so
+    // `looksLikePath` would be false). Relying on looksLikePath here would
+    // let a `..` traversal escape the project root as a silent no-op.
+    if (hasDotDotSegment(arg)) return false;
+    // Literal path: must be project-inner (no `..` escape, resolved inside
+    // projectRoot). Non-path args (e.g. `-c` already skipped; pattern args
+    // like `^###` are not paths and pass as literal).
+    if (looksLikePath(arg)) {
+      if (!isBoundedPrefix(arg, projectRoot) && !isInside(arg, projectRoot)) {
+        return false;
+      }
+    }
+  }
+
+  // --- B4: no side-effect constructs inside `$()` ---
+  if (/[|;>&]|<<|`/.test(trimmed)) return false;
+  if (/[*?[]/.test(trimmed)) return false;
 
   return true;
 }

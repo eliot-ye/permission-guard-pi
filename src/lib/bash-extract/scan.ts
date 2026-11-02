@@ -2,7 +2,8 @@
 // Detects constructs that make static analysis impossible.
 // Pure module — no IO / no side effects.
 
-import { isBoundedGlobSafe, isForLoopIterationGlobExempt } from "./readonly.ts";
+import { isBoundedGlobSafe, isForLoopIterationGlobExempt, isForBodySubstitutionExempt, isBoundedPrefix, type ForLoopContext } from "./readonly.ts";
+import { parseGlobForLoop } from "./control-flow.ts";
 
 export function parseHeredocDelimiter(
   cmd: string,
@@ -242,6 +243,93 @@ export function isSubstitutionReadOnlyAt(
   return { safe: true, closingParen: i - 1 };
 }
 
+// -------- For-body context lookup (scan-time) --------
+
+/**
+ * Find the for-loop context that contains `pos` (a `$(` position), if any.
+ *
+ * Walks backward from `pos` to the nearest top-level `for` keyword, parses
+ * the for-loop structure via `parseGlobForLoop`, and returns a ForLoopContext
+ * when `pos` falls inside the loop's body (between `do` and `done`).
+ *
+ * Returns null when:
+ *   - no enclosing for-loop is found
+ *   - `pos` is not inside the loop body (e.g. in the iteration set)
+ *   - the for-loop structure is invalid
+ *   - the iteration set is not bounded-safe (glob prefix outside projectRoot)
+ */
+function findForBodyCtx(cmd: string, pos: number, projectRoot: string): ForLoopContext | null {
+  // Walk backward to the nearest `for` keyword at a command boundary.
+  let j = pos;
+  while (j >= 0) {
+    if (j >= 3 && cmd.slice(j - 3, j) === "for") {
+      const before = j - 4;
+      if (before < 0 || /[\s;&|\n]/.test(cmd[before])) {
+        const info = parseGlobForLoop(cmd, j - 3);
+        if (!info) { j--; continue; }
+        // `pos` must be inside the body: `doPos + 2` .. `doneStart`.
+        if (pos < info.doPos + 2 || pos >= info.doneStart) { j--; continue; }
+        // Bounded-safe iteration set: every iteration word's path prefix
+        // must be empty (cwd-relative glob) or fully inside projectRoot.
+        // Literal words (e.g. `/etc/passwd`) are checked too — a literal
+        // word outside projectRoot makes the set unbounded (B3 fail).
+        const bounded = info.iterWords.every((w) => {
+          const globIdx = w.search(/[?*\\[]/);
+          const prefix = globIdx >= 0 ? w.slice(0, globIdx) : w;
+          return prefix === "" || isBoundedPrefix(prefix, projectRoot);
+        });
+        if (!bounded) return null;
+        return { varName: info.varName, bounded: true };
+      }
+    }
+    j--;
+  }
+  return null;
+}
+
+/**
+ * Find the index of the `)` matching a `$(` at `startPos` (the `$` position).
+ * Returns -1 when unbalanced or the block is malformed.
+ *
+ * Quote-aware: single quotes preserve content literally; double quotes allow
+ * nested `$(` (recursively matched); backslash escapes the next char.
+ */
+function findSubstitutionClosingParen(cmd: string, startPos: number): number {
+  let depth = 1;
+  let i = startPos + 2; // skip `$(`
+  let quote: null | "'" | '"' = null;
+  let escaped = false;
+  while (i < cmd.length) {
+    const ch = cmd[i];
+    const next = i + 1 < cmd.length ? cmd[i + 1] : "";
+    if (escaped) { escaped = false; i += 1; continue; }
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") { escaped = true; i += 1; continue; }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      if (ch === "$" && next === "(") { depth += 1; i += 2; continue; }
+      i += 1;
+      continue;
+    }
+    if (ch === "'") { quote = "'"; i += 1; continue; }
+    if (ch === '"') { quote = '"'; i += 1; continue; }
+    if (ch === "(") { depth += 1; i += 1; continue; }
+    if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+      i += 1;
+      continue;
+    }
+    if (ch === "$" && next === "(") { depth += 1; i += 2; continue; }
+    i += 1;
+  }
+  return -1;
+}
+
 // -------- Scan for constructs that MUST be unreliable (D6) --------
 
 export function scanUnreliable(cmd: string, projectRoot?: string): string | undefined {
@@ -288,6 +376,21 @@ export function scanUnreliable(cmd: string, projectRoot?: string): string | unde
           i = sub.closingParen;
           continue;
         }
+        // For-body iteration-variable binding exemption (B1-B4): inside
+        // double quotes, `$()` is still a command substitution per bash.
+        // Same for-body context check as the unquoted branch below — the
+        // B1-B4 predicate is quote-position independent.
+        const forCtx = projectRoot ? findForBodyCtx(cmd, i, projectRoot) : null;
+        if (forCtx && projectRoot) {
+          const closing = findSubstitutionClosingParen(cmd, i);
+          if (closing >= 0) {
+            const inner = cmd.slice(i + 2, closing);
+            if (isForBodySubstitutionExempt(inner, forCtx, projectRoot)) {
+              i = closing;
+              continue;
+            }
+          }
+        }
         return "command_substitution";
       }
       if (ch === "`") return "backtick_substitution";
@@ -303,6 +406,21 @@ export function scanUnreliable(cmd: string, projectRoot?: string): string | unde
       if (sub.safe) {
         i = sub.closingParen;
         continue;
+      }
+      // For-body iteration-variable binding exemption (B1-B4): when the `$(`
+      // sits inside a for-loop body with a bounded iteration set, check
+      // whether the inner command's path arguments bind to the iteration
+      // variable. If so, exempt `command_substitution`.
+      const forCtx = projectRoot ? findForBodyCtx(cmd, i, projectRoot) : null;
+      if (forCtx && projectRoot) {
+        const closing = findSubstitutionClosingParen(cmd, i);
+        if (closing >= 0) {
+          const inner = cmd.slice(i + 2, closing);
+          if (isForBodySubstitutionExempt(inner, forCtx, projectRoot)) {
+            i = closing;
+            continue;
+          }
+        }
       }
       return "command_substitution";
     }

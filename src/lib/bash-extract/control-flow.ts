@@ -98,9 +98,12 @@ export function scanControlFlow(cmd: string, projectRoot?: string): {
       if (tokenStart >= 0) {
         const token = cmd.slice(tokenStart, i);
         if (token === "for") {
-          const forResult = isLiteralForLoop(cmd, tokenStart);
+          const forResult = isLiteralForLoop(cmd, tokenStart, projectRoot);
           if (forResult.exempt) {
             loopVars.push(forResult.varName!);
+            // Loop-local assignment variables in the body (e.g. `n` from
+            // `n=5`) are resolved — same as the glob-iteration branch.
+            if (forResult.body) loopVars.push(...collectBodyAssignments(forResult.body));
             i = forResult.doneEnd! - 1; // for-loop i++ will land at doneEnd
             tokenStart = -1;
             continue;
@@ -112,6 +115,10 @@ export function scanControlFlow(cmd: string, projectRoot?: string): {
             const loopInfo = parseGlobForLoop(cmd, tokenStart);
             if (loopInfo) {
               loopVars.push(loopInfo.varName);
+              // Loop-local assignment variables in the body (e.g. `n`, `s`
+              // from `n=$(grep ...)`) are resolved — the variable-resolution
+              // pass must treat `$n`/`$s` as understood.
+              loopVars.push(...collectBodyAssignments(loopInfo.body));
               i = loopInfo.doneEnd - 1;
               tokenStart = -1;
               continue;
@@ -136,15 +143,21 @@ export function scanControlFlow(cmd: string, projectRoot?: string): {
   if (tokenStart >= 0) {
     const token = cmd.slice(tokenStart);
     if (token === "for") {
-      const forResult = isLiteralForLoop(cmd, tokenStart);
+      const forResult = isLiteralForLoop(cmd, tokenStart, projectRoot);
       if (forResult.exempt) {
         loopVars.push(forResult.varName!);
+        // Loop-local assignment variables in the body (e.g. `n` from
+        // `n=5`) are resolved — same as the glob-iteration branch.
+        if (forResult.body) loopVars.push(...collectBodyAssignments(forResult.body));
         return { hit: false, loopVars };
       }
       if (projectRoot && isGlobForLoopExempt(cmd, tokenStart, projectRoot)) {
         const loopInfo = parseGlobForLoop(cmd, tokenStart);
         if (loopInfo) {
           loopVars.push(loopInfo.varName);
+          // Loop-local assignment variables in the body (e.g. `n`, `s`
+          // from `n=$(grep ...)`) are resolved.
+          loopVars.push(...collectBodyAssignments(loopInfo.body));
           return { hit: false, loopVars };
         }
       }
@@ -154,6 +167,24 @@ export function scanControlFlow(cmd: string, projectRoot?: string): {
   }
 
   return { hit: false, loopVars };
+}
+
+/**
+ * Collect assignment variable names in a for-loop body, e.g. `n` and `s`
+ * from `n=$(grep -c ... "$f"); s=$(grep -c ... "$f")`. These are loop-local
+ * variables that later body commands may reference (`echo "$n"`). They must
+ * be treated as resolved by the variable-resolution pass (step 4) so the
+ * for-body substitution exemption (B1-B4) doesn't get defeated by an
+ * unresolved-variable rejection.
+ */
+export function collectBodyAssignments(body: string): string[] {
+  const names: string[] = [];
+  const parts = splitCommands(body);
+  for (const part of parts) {
+    const m = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(part.trim());
+    if (m) names.push(m[0].slice(0, -1));
+  }
+  return names;
 }
 
 /**
@@ -171,7 +202,10 @@ export function isGlobForLoopExempt(
   if (!info) return false;
   if (!info.iterHasGlob) return false;
   if (!info.globPrefixes.every(p => p === "" || isBoundedPrefix(p, projectRoot))) return false;
-  if (!isForBodyReadOnly(info.body)) return false;
+  // Pass the for-loop context (iteration variable name + bounded=true, since
+  // the glob prefixes were just verified inside projectRoot) so the body's
+  // assignment forms with `$(...)` can be exempted via B1-B4.
+  if (!isForBodyReadOnly(info.body, { varName: info.varName, bounded: true }, projectRoot)) return false;
   return true;
 }
 
@@ -189,8 +223,11 @@ export function parseGlobForLoop(cmd: string, pos: number): {
   varName: string;
   iterHasGlob: boolean;
   globPrefixes: string[];
+  iterWords: string[];
   body: string;
   doneEnd: number;
+  doPos: number;
+  doneStart: number;
 } | null {
   let i = pos + 3; // skip `for`
 
@@ -209,6 +246,7 @@ export function parseGlobForLoop(cmd: string, pos: number): {
 
   // --- scan iteration-set words until `;` or `do` ---
   const globPrefixes: string[] = [];
+  const iterWords: string[] = [];
   let iterHasGlob = false;
   let iterQuote: null | "'" | '"' = null;
   let iterEscaped = false;
@@ -229,6 +267,8 @@ export function parseGlobForLoop(cmd: string, pos: number): {
     if (/\s/.test(ch)) {
       if (wordStart >= 0) {
         // End of a word in the iteration set.
+        const word = cmd.slice(wordStart, i);
+        iterWords.push(word);
         wordStart = -1;
       }
       i++;
@@ -238,6 +278,7 @@ export function parseGlobForLoop(cmd: string, pos: number): {
       if (wordStart >= 0) {
         // Check if this word has a glob.
         const word = cmd.slice(wordStart, i);
+        iterWords.push(word);
         if (/[?*\\[]/.test(word)) {
           iterHasGlob = true;
           // Extract prefix: chars before first glob char in this word.
@@ -296,7 +337,9 @@ export function parseGlobForLoop(cmd: string, pos: number): {
         const tok = cmd.slice(bodyTokenStart, i);
         if (tok === "done") {
           depth--;
-          if (depth === 0) doneEnd = i + 1;
+          // `done` spans [bodyTokenStart, i); its end (exclusive) is `i`.
+          // `doneEnd - 4` is then the body's end — the `done` keyword itself.
+          if (depth === 0) doneEnd = i;
         }
         bodyTokenStart = -1;
       }
@@ -318,7 +361,7 @@ export function parseGlobForLoop(cmd: string, pos: number): {
   // --- extract body ---
   const body = cmd.slice(doPos + 2, doneEnd - 4).trim();
 
-  return { varName, iterHasGlob, globPrefixes, body, doneEnd };
+  return { varName, iterHasGlob, globPrefixes, iterWords, body, doneEnd, doPos, doneStart: doneEnd - 4 };
 }
 
 /**
@@ -350,10 +393,11 @@ export function isLiteralIterationWord(word: string): boolean {
 // NOT touch filesystem paths (no read/write/delete). Allowed in for-loop
 // bodies alongside READ_ONLY_COMMANDS and SILENT_COMMANDS.
 
-export function isLiteralForLoop(cmd: string, pos: number): {
+export function isLiteralForLoop(cmd: string, pos: number, projectRoot?: string): {
   exempt: boolean;
   varName?: string;
   doneEnd?: number;
+  body?: string;
 } {
   let i = pos + 3; // skip `for`
 
@@ -446,7 +490,8 @@ export function isLiteralForLoop(cmd: string, pos: number): {
         const tok = cmd.slice(bodyTokenStart, i);
         if (tok === "done") {
           depth -= 1;
-          if (depth === 0) doneEnd = i + 1;
+          // `done` spans [bodyTokenStart, i); its end (exclusive) is `i`.
+          if (depth === 0) doneEnd = i;
         }
         bodyTokenStart = -1;
       }
@@ -469,9 +514,19 @@ export function isLiteralForLoop(cmd: string, pos: number): {
   // --- body must be read-only only ---
   // body is between `do` (doPos+2, i.e. after "do") and `done` (doneEnd-4).
   const body = cmd.slice(doPos + 2, doneEnd - 4).trim();
-  if (!isForBodyReadOnly(body)) return { exempt: false };
+  // Literal iteration set is bounded when every word is project-inner
+  // (isBoundedPrefix rejects `/etc/...` and `..`-traversal words). When
+  // projectRoot is provided and the set is bounded, pass the for-loop
+  // context so the body's assignment forms with `$(...)` can be exempted
+  // via B1-B4 (same as the glob-iteration path).
+  let forCtx: { varName: string; bounded: boolean } | null = null;
+  if (projectRoot) {
+    const bounded = words.every((w) => isBoundedPrefix(w, projectRoot));
+    forCtx = { varName, bounded };
+  }
+  if (!isForBodyReadOnly(body, forCtx, projectRoot)) return { exempt: false };
 
-  return { exempt: true, varName, doneEnd };
+  return { exempt: true, varName, doneEnd, body };
 }
 
 // Shell names that, when followed by -c, execute a command from a string.

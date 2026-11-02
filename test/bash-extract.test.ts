@@ -4653,3 +4653,110 @@ test("BT-SED-21: sed_escaped_delimiter_replace_safe", () => {
   assert.equal(r3.reliable, false, `expected unreliable, got ${JSON.stringify(r3)}`);
   if (!r3.reliable) assert.equal(r3.reason, "unreliable_command");
 });
+
+// --- for-body substitution exempt (for-loop-readonly-substitution-exempt) ---
+//
+// 只读 for 循环统计命令误报修复：for 循环迭代变量绑定的 $(grep/cat/...) 
+// 命令替换在 B1-B4 判据满足时豁免 command_substitution；赋值形态识别。
+// 反例用字面量迭代集（`for f in a b c`）而非 glob 迭代集——glob 迭代集的
+// glob 分支会在 `$()` 之前拦截（reason 为 glob_expansion），测试不到 B1-B4。
+
+test("BT-FSUB-1: for-loop iteration-set glob + assignment $(grep) read-only body is reliable", () => {
+  // 用户原始命令形态：迭代集 glob（bounded）+ body 含赋值 $(grep "$f")。
+  const r = extractBashTargets(`for f in openspec/specs/*/spec.md; do n=$(grep -c '^### Requirement:' "$f"); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-FSUB-2: for-loop iteration-set glob + pure literal assignment body is reliable", () => {
+  // body 含纯字面量赋值 n=5（无 $()）。
+  const r = extractBashTargets(`for f in openspec/specs/*/spec.md; do n=5; echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-FSUB-3: for-loop iteration-set glob + assignment $(cat) read-only body is reliable", () => {
+  // cat 也是 READ_ONLY_COMMANDS，绑定豁免适用。
+  const r = extractBashTargets(`for f in openspec/specs/*/spec.md; do n=$(cat "$f"); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-FSUB-4: for-body binding $(grep) non-bound path is unreliable", () => {
+  // 字面量迭代集，$() 分支可达；/etc/passwd 非迭代变量非项目内路径 → B2 不满足。
+  const r = extractBashTargets(`for f in a b c; do n=$(grep -c '^###' "$f" /etc/passwd); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-5: for-body binding $(grep) unbound variable is unreliable", () => {
+  // $OTHER 未绑定用户变量 → B2 不满足。
+  const r = extractBashTargets(`for f in a b c; do n=$(grep -c '^###' "$f" $OTHER); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-6: for-body binding $(rm) write command is unreliable", () => {
+  // rm 写命令 → B1 不满足。
+  const r = extractBashTargets(`for f in a b c; do n=$(rm "$f"); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-7: for-iteration-set out-of-project is unreliable", () => {
+  // 绝对路径字面量迭代集，$() 分支可达；迭代集出界 → B3 不满足。
+  const r = extractBashTargets(`for f in /etc/passwd /etc/shadow; do n=$(grep -c '^#' "$f"); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-8: top-level $(grep) without for context is unreliable (security boundary)", () => {
+  // 顶层 $(grep /etc/passwd) 无 for 上下文 → 维持原 command_substitution。
+  const r = extractBashTargets(`echo "$(grep -c '^#' /etc/passwd)"`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-9: top-level $(cat) without for context is unreliable (security boundary)", () => {
+  // 顶层 $(cat /etc/passwd) 无 for 上下文 → 维持原 command_substitution。
+  const r = extractBashTargets(`echo "$(cat /etc/passwd)"`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-10: full && chain with for-body substitution is reliable", () => {
+  // 用户原始命令形态：&& 链 + for 循环体含赋值 $(grep) + $(basename $(dirname))。
+  // 系统级验证暴露：`done` 后有尾随 `&&` 时 parseGlobForLoop/isLiteralForLoop
+  // 的 doneEnd 偏 +1（off-by-one），body 多含 `done` 首字符导致误判。此测试
+  // 固化该形态，防止回归。
+  const r = extractBashTargets(
+    `echo "=== spec summary ===" && for f in openspec/specs/*/spec.md; do n=$(grep -c '^### Requirement:' "$f"); s=$(grep -c '^#### Scenario:' "$f"); echo "$(basename $(dirname $f)): Req=$n Scen=$s"; done && echo "" && echo "=== reverse-spec ===" && cat openspec/.td-state/reverse-spec-20261027-181310.md 2>/dev/null | head -60`,
+    PROJ,
+  );
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-FSUB-11: double-quoted for-body $(grep) binding is reliable", () => {
+  // 双引号内 `$(grep "$f")` 与引号外赋值形态共享同一 B1-B4 判据：
+  // bash 中双引号内 $() 仍是命令替换，绑定豁免应一致生效。
+  const r = extractBashTargets(`for f in openspec/specs/*/spec.md; do echo "$(grep -c '^###' "$f")"; done`, PROJ);
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("BT-FSUB-12: double-quoted for-body $(grep) non-bound is unreliable", () => {
+  // 双引号内非绑定路径（/etc/passwd）仍拒绝。
+  const r = extractBashTargets(`for f in a b c; do echo "$(grep -c '^#' "$f" /etc/passwd)"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+test("BT-FSUB-13: for-body $(grep) with dotdot traversal is unreliable", () => {
+  // 收尾 review Issue 1（critical）固化：B2 路径绑定检查此前仅当
+  // `looksLikePath(arg)` 为 true 时调用 bounded 检查，`x/../../etc/passwd`
+  // 不以 `/`、`~`、`./`、`../` 开头且无点扩展名 → looksLikePath=false →
+  // `..` 越界逃逸被放行（reliable: true, 0 target，静默读 /etc/passwd）。
+  // 修复：B2 无条件检查 hasDotDotSegment。此测试锁定逃逸路径必须拒绝。
+  // 用字面量迭代集（`for f in a b c`）——glob 迭代集会被 glob 分支先拦截
+  // （reason 为 glob_expansion），测不到 B2；字面量迭代集让 `$()` 分支
+  // 真正执行（reason 为 command_substitution）。
+  const r = extractBashTargets(`for f in a b c; do n=$(grep -c '^#' "$f" x/../../etc/passwd); echo "$n"; done`, PROJ);
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});

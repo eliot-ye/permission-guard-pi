@@ -3,7 +3,7 @@
 
 import { splitCommands, splitPipelines, tokenize, extractRedirects } from "./parse.ts";
 import type { ExtractAction } from "./parse.ts";
-import { isReadOnlyWithArgs } from "./readonly.ts";
+import { isReadOnlyWithArgs, isForBodySubstitutionExempt, type ForLoopContext } from "./readonly.ts";
 import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
 import { SHELL_WRAPPER_NAMES, skipWrapperTokens } from "./shell-forwarder.ts";
 
@@ -921,9 +921,19 @@ export const HARMLESS_BUILTINS = new Set([
 /**
  * Check whether a for-loop body consists only of read-only/harmless commands.
  * The body string is the text between `do` and `done` (excluding them).
+ *
+ * `forCtx`/`projectRoot` enable the assignment-form recognition and the
+ * for-body iteration-variable substitution exemption (B1-B4). When either is
+ * omitted (callers that only need the literal-body path), the original
+ * behavior is preserved: assignment forms without context are treated as
+ * read-only only if their right-hand side is a pure literal (no `$()`).
  */
 
-export function isForBodyReadOnly(body: string): boolean {
+export function isForBodyReadOnly(
+  body: string,
+  forCtx?: ForLoopContext | null,
+  projectRoot?: string,
+): boolean {
   if (!body.trim()) return true; // empty body is OK (no commands)
   // Split by top-level command separators (`;`, `&&`, `||`, `&`, `\n`).
   // This groups each body command as one part (e.g. `grep "$f"`), so we can
@@ -932,6 +942,13 @@ export function isForBodyReadOnly(body: string): boolean {
 
   for (const part of parts) {
     if (!part.trim()) continue;
+    // Assignment form: `VAR=...` (e.g. `n=$(grep -c ... "$f")`, `n=5`).
+    // The whole part is one assignment — it is read-only when the RHS is a
+    // pure literal, or a `$(...)` substitution that passes the for-body
+    // binding exemption (B1-B4).
+    if (isAssignmentPart(part, forCtx ?? null, projectRoot ?? "")) {
+      continue;
+    }
     const tokens = tokenize(part);
     if (tokens.length === 0) continue;
     const cmdName = tokens[0]?.split("/").pop() ?? "";
@@ -943,4 +960,35 @@ export function isForBodyReadOnly(body: string): boolean {
     }
   }
   return true;
+}
+
+/**
+ * Check whether a for-loop body command part is an assignment (`VAR=...`)
+ * and, if so, whether it is read-only.
+ *
+ * - `n=5` (pure literal RHS, no `$`, glob, backtick, `(`) → read-only.
+ * - `n=$(grep -c ... "$f")` (RHS is a single `$(...)` block) → read-only iff
+ *   the inner substitution passes `isForBodySubstitutionExempt` (B1-B4).
+ * - Any other RHS (contains `;`/`|`/`>`/unquoted glob/backtick/`(` other
+ *   than the leading `$(`) → not read-only (fail-closed).
+ */
+function isAssignmentPart(part: string, forCtx: ForLoopContext | null, projectRoot: string): boolean {
+  const m = /^[A-Za-z_][A-Za-z0-9_]*=(.*)$/.exec(part);
+  if (!m) return false;
+  const rhs = m[1];
+  if (!rhs) return true; // `VAR=` empty — no side effect
+  // Pure literal RHS: no `$`, no glob, no backtick, no paren, no
+  // separator/redirect. Conservative — a literal assignment is inert.
+  if (!/\$|[?*[]|`|\(|\)|;|\||>|</.test(rhs)) return true;
+  // RHS is a single `$(...)` block: `$(inner)` to end of part.
+  if (rhs.startsWith("$(") && rhs.endsWith(")")) {
+    // Ensure the block is well-formed: find the matching `)` of the
+    // leading `$(`. If it closes exactly at the end, extract `inner`.
+    const inner = rhs.slice(2, -1);
+    // Reject if the leading `$(` block does not span the whole RHS (a
+    // trailing `)` might belong to a nested construct) — conservative.
+    if (inner.includes(";") || inner.includes("|") || inner.includes(">")) return false;
+    return isForBodySubstitutionExempt(inner, forCtx, projectRoot);
+  }
+  return false;
 }

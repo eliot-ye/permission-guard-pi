@@ -664,16 +664,16 @@ type ExtractResult =
 
 `find` 的其他参数（`-name`/`-type`/`-size`/`-mtime`/`-user`/`-group`/`-newer`/`-newermt`/`-maxdepth`/`-mindepth` 等 100+ 个过滤条件）MUST 视为不改变 `find` 的只读性质。
 
-**for 循环体只读判定**：当命令名为 `for` 且条件 3c 的前置（结构完整 + 迭代集含 glob）满足时，MUST 检查该 for 循环的 BODY 是否只读。BODY 的只读判定复用"字面量 for 循环豁免"requirement 中的 BODY 只读规则——BODY 里的每条命令都必须是 read-only（READ_ONLY_COMMANDS 集合、SILENT_COMMANDS、HARMLESS_BUILTINS，或 `find` 且通过 find 的参数条件性只读判定）。
+**for 循环体只读判定**：当命令名为 `for` 且条件 3c 的前置（结构完整 + 迭代集含 glob）满足时，MUST 检查该 for 循环的 BODY 是否只读。BODY 的只读判定复用"字面量 for 循环豁免"requirement 中的 BODY 只读规则——BODY 里的每条命令都必须是 read-only（READ_ONLY_COMMANDS 集合、SILENT_COMMANDS、HARMLESS_BUILTINS，或 `find` 且通过 find 的参数条件性只读判定），**或变量赋值形态（`VAR=...`，其中右侧为纯字面量，或右侧经"命令替换内只读命令豁免"requirement 判定为只读的 `$(...)`）**——本 change 新增赋值形态识别。
 
 **理由**：`for` 循环的迭代集 glob（如 `for d in openspec/specs/*/; do ls "$d"; done`）在实际文件访问上等价于 shell 展开后的 `ls openspec/specs/1/ openspec/specs/2/ ...`——展开的目标集合完全位于项目内（因为 glob 前缀被条件 2 限定在项目内），且循环体只做 read-only 操作（通过条件 3c 的 BODY 只读判定）。原实现把 `for` 当作"不在 READ_ONLY_COMMANDS"的普通命令处理，导致迭代集内的 glob 被 `scanUnreliable` 提前触发 `glob_expansion`，永远走不到 `scanControlFlow` 的字面量 for 循环豁免。本条件 3c 直接在 `isBoundedGlobSafe` 层面处理该情形，避免 `scanUnreliable` 与 `scanControlFlow` 的短路冲突。
 
-**find 载荷感知（payload-aware）判定的理由（本 change 新增）**：原实现把 `-exec`/`-execdir` 一律判写——即使载荷命令是 `cat`/`wc`/`grep` 这类已知只读命令（`find . -name '*.ts' -exec cat {} \;` 对匹配文件仅读取，无写副作用）。实测确认（2026-11-02）本项目对该形态判 `find_write_flag`（误报），与宿主 bash 审批层的同类弹窗一致。本 change 在「载荷命令名 ∈ READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS」这一窄条件下放宽，写载荷（`rm`）、未知载荷（`sh`/`bash`/`xargs`）、`{}` 直接执行、`+` 终止、交互式 `-ok`/`-okdir` 均维持判写（fail-closed）。放宽不弱化对真实写操作的保守判定，属局部优化且不全局失调。
+**find 载荷感知（payload-aware）判定的理由（前序 change 引入）**：原实现把 `-exec`/`-execdir` 一律判写——即使载荷命令是 `cat`/`wc`/`grep` 这类已知只读命令（`find . -name '*.ts' -exec cat {} \;` 对匹配文件仅读取，无写副作用）。实测确认本项目对该形态判 `find_write_flag`（误报），与宿主 bash 审批层的同类弹窗一致。本 change 在「载荷命令名 ∈ READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS」这一窄条件下放宽，写载荷（`rm`）、未知载荷（`sh`/`bash`/`xargs`）、`{}` 直接执行、`+` 终止、交互式 `-ok`/`-okdir` 均维持判写（fail-closed）。放宽不弱化对真实写操作的保守判定，属局部优化且不全局失调。
 
-**空 prefix 放宽的理由**：条件 2 原本要求 glob 前缀完全位于 projectRoot 内部，并显式拒绝空 prefix（"Empty prefix means the glob is at token start"）。本 change 引入两处情形 A/B 的放宽：
+**空 prefix 放宽的理由（前序 change 引入）**：条件 2 原本要求 glob 前缀完全位于 projectRoot 内部，并显式拒绝空 prefix（"Empty prefix means the glob is at token start"）。前序 change 引入两处情形 A/B 的放宽：
 
 - **情形 A（for 循环迭代集）**：对 for-loop 迭代集内的空 prefix glob（如 `for x in *.log; do wc -l "$x"; done`），迭代词 `*.log` 是 cwd-relative 的——shell 在 cwd 展开，cwd == projectRoot 假设下展开结果完全 bounded 于 projectRoot。原实现对该形态误判 `glob_expansion`，导致用户在项目根下运行只读 for 循环被弹窗打断。该情形在既有 spec 已有覆盖，此处保留。
-- **情形 B（只读命令）**：对非 for-loop 路径的空 prefix glob（如 `ls *.md`、`ls *`），当命令只读（条件 3 满足）且 glob 不以绝对路径标志开头时，空前缀视为 cwd-relative 并 bounded 于 projectRoot——cwd == projectRoot 假设下，`ls *.md` 展开结果完全位于项目内，且命令只读，无写副作用风险。原实现对 `ls *.md` 误判 `glob_expansion`，导致用户顺手列文件被弹窗打断（真实案例：`cat package.json 2>/dev/null | head -60; echo "---README---"; ls *.md 2>/dev/null`）。情形 B 仅在该窄条件放宽：(1) 命令只读；(2) 前缀为空；(3) glob 不以绝对路径标志开头。三重约束保证放宽范围极窄，不影响绝对路径前缀（`/etc/*.conf` 仍拒绝）或写命令（`rm *.log` 仍拒绝）的判定。
+- **情形 B（只读命令）**：对非 for-loop 路径的空 prefix glob（如 `ls *.md`、`ls *`），当命令只读（条件 3 满足）且 glob 不以绝对路径标志开头时，空前缀视为 cwd-relative 并 bounded 于 projectRoot——cwd == projectRoot 假设下，`ls *.md` 展开结果完全位于项目内，且命令只读，无写副作用风险。原实现对 `ls *.md` 误判 `glob_expansion`，导致用户顺手列文件被弹窗打断。情形 B 仅在该窄条件放宽：(1) 命令只读；(2) 前缀为空；(3) glob 不以绝对路径标志开头。三重约束保证放宽范围极窄，不影响绝对路径前缀（`/etc/*.conf` 仍拒绝）或写命令（`rm *.log` 仍拒绝）的判定。
 
 **边界**：
 - 条件 3c 只在迭代集**含 glob** 时适用；不含 glob 的字面量 for 循环（如 `for i in a b c`）走"字面量 for 循环豁免"requirement
@@ -681,6 +681,7 @@ type ExtractResult =
 - for 循环结构不完整（无 `do`、无 `; done`）时，条件 3c 不满足
 - 空 prefix 放宽（情形 A/B）仅适用于 glob 不以绝对路径标志开头；以 `/`、`~`、`C:\` 开头的 glob（如 `/etc/*.conf`）仍拒绝
 - **情形 B 与条件 3 的耦合**：情形 B 的放宽判定**要求条件 3 的只读判定通过**——若命令是写命令（`rm`、`tar`、`mv` 等），条件 3 不满足，空 prefix glob 仍判 `glob_expansion`（写命令的空 prefix glob 无法静态确定目标集合，且可能删除/写入未知文件）
+- **赋值形态的判定边界（本 change 新增）**：`VAR=...` 赋值仅当右侧为纯字面量（`n=5`）或右侧 `$(...)` 通过"命令替换内只读命令豁免"时视为只读；右侧含未知命令/写操作/未绑定路径时，赋值命令不满足只读，整条 BODY 判非只读（fail-closed）
 
 **反例（仍触发 glob_expansion）**：
 - glob 前缀出界（如 `for d in ../other/*; do ls "$d"; done`、`for d in /tmp/*; do cat "$d"; done`）
@@ -688,7 +689,7 @@ type ExtractResult =
 - BODY 含非只读命令（如 `for d in openspec/*/; do curl "$d"; done`）
 - for 循环结构不完整（如 `for d in openspec/*/; do ls "$d"` 无 `; done`）
 - 迭代集全字面量（如 `for i in a b c; do echo "$i"; done`）——本条件不适用，走"字面量 for 循环豁免"requirement
-- `find` 含写操作参数（如 `find src/ -name "*.bak" -delete`、`find . -name "*.log" -exec rm {} \;`）——`-delete` 始终判写；`-exec rm` 载荷 `rm` 是写载荷，判写（本 change 后仍成立）
+- `find` 含写操作参数（如 `find src/ -name "*.bak" -delete`、`find . -name "*.log" -exec rm {} \;`）——`-delete` 始终判写；`-exec rm` 载荷 `rm` 是写载荷，判写
 - `find -exec`/`-execdir` 载荷命令名不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS（如 `find . -exec sh -c 'rm $1' _ {} \;`、`find . -exec chmod 600 {} \;`）
 - `find -exec`/`-execdir` 载荷命令名缺失或为 `{}`/flag（如 `find . -exec {} \;`、`find . -exec \;`）
 - 空 prefix 迭代词以绝对路径标志开头（如 `for f in /etc/*.conf; do cat "$f"; done`、`for f in ~/*.conf; do cat "$f"; done`）
@@ -725,7 +726,7 @@ type ExtractResult =
 #### Scenario: `find -exec` 在 glob 上下文触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec rm {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 载荷 `rm` 是写载荷（不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS），判写，条件 3 不满足（本 change 后仍成立：写载荷不因载荷感知放宽）
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 载荷 `rm` 是写载荷（不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS），判写，条件 3 不满足
 
 #### Scenario: `find -execdir` 在 glob 上下文触发 glob_expansion
 
@@ -740,37 +741,37 @@ type ExtractResult =
 #### Scenario: `find -exec cat` 只读载荷自动放行
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec cat {} \;`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `cat` 属于 READ_ONLY_COMMANDS，载荷感知判定不判写，条件 3 满足（本 change 新增：原实现误判 glob_expansion）
+- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `cat` 属于 READ_ONLY_COMMANDS，载荷感知判定不判写，条件 3 满足（前序 change 新增：原实现误判 glob_expansion）
 
 #### Scenario: `find -exec wc` 只读载荷自动放行
 
 - **WHEN** bash 命令为 `find src/ -name "*.log" -exec wc -l {} \;`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `wc` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增）
+- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `wc` 属于 READ_ONLY_COMMANDS，不判写（前序 change 新增）
 
 #### Scenario: `find -execdir cat` 只读载荷自动放行
 
 - **WHEN** bash 命令为 `find src/ -name "*.log" -execdir cat {} \;`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true }`——`-execdir` 载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增：原实现误判 glob_expansion）
+- **THEN** 提取结果为 `{ reliable: true }`——`-execdir` 载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（前序 change 新增：原实现误判 glob_expansion）
 
 #### Scenario: `find -exec cat {} +` 加号终止只读载荷自动放行
 
 - **WHEN** bash 命令为 `find src/ -name "*.ts" -exec cat {} +`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true }`——`+` 终止符与 `;` 等价处理，载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增）
+- **THEN** 提取结果为 `{ reliable: true }`——`+` 终止符与 `;` 等价处理，载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（前序 change 新增）
 
 #### Scenario: `find -exec echo` HARMLESS 载荷自动放行
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec echo {} \;`，projectRoot 内
-- **THEN** 提取结果为 `{ reliable: true }`——载荷 `echo` 属于 HARMLESS_BUILTINS，不判写（本 change 新增）
+- **THEN** 提取结果为 `{ reliable: true }`——载荷 `echo` 属于 HARMLESS_BUILTINS，不判写（前序 change 新增）
 
 #### Scenario: `find -exec sh -c` 载荷仍触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec sh -c 'rm "$1"' _ {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——载荷 `sh` 不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS（shell 转发器，可执行任意命令），判写（本 change 新增反例）
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——载荷 `sh` 不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS（shell 转发器，可执行任意命令），判写（前序 change 新增反例）
 
 #### Scenario: `find -exec {}` 无命令载荷仍触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 后无载荷命令名（首个 token 是 `{}`），判写（本 change 新增反例）
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 后无载荷命令名（首个 token 是 `{}`），判写（前序 change 新增反例）
 
 #### Scenario: 写命令内的 glob 仍触发 glob_expansion
 
@@ -910,7 +911,7 @@ type ExtractResult =
 #### Scenario: 只读命令 + 裸空 prefix glob 自动放行（情形 B 新增）
 
 - **WHEN** bash 命令为 `ls *`，projectRoot 内（cwd == projectRoot）
-- **THEN** 提取结果为 `{ reliable: true, targets: [read <projectRoot>/*] }`，不触发 glob_expansion——`ls` 只读，情形 B 放宽适用（原 BMG44 行为变更）
+- **THEN** 提取结果为 `{ reliable: true, targets: [read <projectRoot>/*] }`，不触发 glob_expansion——`ls` 只读，情形 B 放宽适用
 
 #### Scenario: 写命令 + 空 prefix glob 仍触发 glob_expansion（情形 B 反例新增）
 
@@ -926,6 +927,31 @@ type ExtractResult =
 
 - **WHEN** bash 命令为 `ls ~/*.md`，projectRoot 内
 - **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——glob 以 `~` 开头（home 展开），情形 B 不适用
+
+#### Scenario: for 迭代集 glob + 赋值 $(grep) 只读 body 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(grep -c '^### Requirement:' "$f"); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——循环体含变量赋值 `n=$(grep -c ...)`，赋值右侧 `$(grep ...)` 经"命令替换内只读命令豁免"的 for-body 迭代变量绑定判据判定为只读（`$f` 绑定迭代集，迭代集 glob 前缀 `openspec/specs/` 在项目内），条件 3c 满足，不触发 glob_expansion
+
+#### Scenario: for 迭代集 glob + 纯赋值只读 body 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=5; echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——循环体含纯字面量赋值 `n=5`（无 `$()`），赋值视为只读，条件 3c 满足
+
+#### Scenario: for 迭代集 glob + 赋值 $(rm) 写 body 仍触发 glob_expansion（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(rm "$f"); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——赋值右侧 `$(rm "$f")` 内命令 `rm` 是写操作，不满足只读，条件 3c 不满足
+
+#### Scenario: for 迭代集 glob + 赋值 $(grep 未绑定路径) 仍触发 glob_expansion（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(grep -c '^###' "$f" /etc/passwd); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——赋值右侧 `$(grep ...)` 含非绑定路径参数 `/etc/passwd`（不在迭代集内），不满足 for-body 迭代变量绑定判据，条件 3c 不满足
+
+#### Scenario: for 迭代集 glob + 赋值 $(grep 未绑定变量) 仍触发 glob_expansion（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(grep -c '^###' "$f" $OTHER); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——赋值右侧 `$(grep ...)` 含未绑定用户变量 `$OTHER`，不满足 for-body 迭代变量绑定判据，条件 3c 不满足
 
 ### Requirement: 设备重定向不计入写目标
 
@@ -1696,7 +1722,16 @@ type ExtractResult =
    - 命令分隔符 `;`（引入额外命令执行）
 4. **用户变量在参数中允许**：白名单命令的参数中可以出现引号内的用户变量（如 `basename "$f"`）——变量的实际值不影响命令的静态只读性判定。这类命令里的用户变量**仍会**在 `findUnresolvedVariable`（"变量展开与展开失败"requirement）判定中被识别为未解析用户变量，走兜底弹窗——**本豁免不覆盖用户变量判定**，豁免判定与用户变量判定是**独立且顺序执行**的两步。
 
-**边界与理由**：命令替换的豁免判定是**保守白名单准入**——白名单外的形式（`$(cat ...)`、`$(grep ...)`、`$(rm -rf ...)`）一律保持原 `command_substitution` 判定不变。豁免的存在不改变默认行为，只让"用户眼中显然安全"的常见 shell 惯用法（`$(basename ...)`、`$(dirname ...)`）不再被误判为噪音弹窗。
+**for-body 迭代变量绑定豁免（本 change 新增）**：当 `$(...)` 出现在一个**结构完整 for 循环的 BODY 内**时，若满足以下**全部**条件，MUST NOT 触发 `command_substitution`——这是独立于上述条件 1-4 的**平行判据**（不与白名单合并，不改变既有白名单语义）：
+
+- **B1 命令只读**：`$(...)` 内展开后的顶层命令名属于 `READ_ONLY_COMMANDS`（`grep` / `cat` / `head` / `tail` / `wc` / `ls` / `stat` 等，不含 `find` 的写形态）或 `HARMLESS_BUILTINS`——命令只读，无写副作用
+- **B2 路径参数绑定**：`$(...)` 内所有**文件系统路径参数**必须静态绑定到 for 迭代变量（`"$f"`，`f` 是当前 for 循环的迭代变量）或项目内字面路径（无 `$` / glob / 反引号）；任一路径参数含未绑定用户变量（`$OTHER`）、未加引号 glob、或非迭代变量的 `$` 引用，MUST NOT 豁免
+- **B3 迭代集 bounded**：当前 for 循环的迭代集是字面量词集合，或含 glob 但 glob 前缀完全位于 `<projectRoot>` 内（复用"有界 glob 免不可靠标记"条件 2）——迭代变量 `$f` 的值域静态确定且 bounded 于项目内
+- **B4 无其他副作用构造**：`$(...)` 内不含输出重定向、管道、`&&`/`;`/`&`、反引号、未引号 heredoc、子 shell（同条件 3 的副作用清单）
+
+**fail-closed 边界（本 change 新增）**：上述 B1-B4 只覆盖 for-body 内的窄上下文。**无 for 上下文**的顶层 `$(grep /etc/passwd)`、`$(cat /etc/passwd)`、`$(rm -rf /tmp)` 等 MUST 维持原 `command_substitution` 判定（白名单外命令不因本 change 获得豁免）——这保持 `readonly.ts` 既有设计的安全边界（豁免顶层读替换会成 silent no-op，绕过授权检查）。
+
+**边界与理由**：命令替换的豁免判定是**保守白名单准入**——白名单外的形式（`$(cat ...)`、`$(grep ...)`、`$(rm -rf ...)`）一律保持原 `command_substitution` 判定不变，**除非**满足上述 for-body 迭代变量绑定豁免（B1-B4 全部满足）。豁免的存在不改变默认行为，只让"用户眼中显然安全"的常见 shell 惯用法（`$(basename ...)`、`$(dirname ...)`）不再被误判为噪音弹窗；for-body 绑定豁免进一步让"for 迭代变量驱动的只读统计命令"（如 `n=$(grep -c ... "$f")`）不再误判。
 
 **顺序与交互**：
 - 本豁免在 `scanUnreliable` 的字符扫描循环内判定，位置在同循环内其他 unreliable 检测（backtick / heredoc / subshell / glob）的**同一次遍历**中——即豁免掉一个 `$(...)` 后，扫描继续向后，其他位置的 unreliable 模式仍会被检测。
@@ -1757,6 +1792,46 @@ type ExtractResult =
 
 - **WHEN** bash 命令为 `echo "cwd: $(pwd)"`
 - **THEN** 提取结果为 `{ reliable: true }`——`pwd` 在白名单内，无参数，豁免成立
+
+#### Scenario: for-body 迭代变量绑定 $(grep) 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(grep -c '^### Requirement:' "$f"); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`$(grep -c ... "$f")` 顶层命令 `grep` 属 READ_ONLY_COMMANDS（B1），路径参数 `"$f"` 绑定迭代变量（B2），迭代集 glob 前缀 `openspec/specs/` 在项目内（B3），无其他副作用构造（B4），for-body 绑定豁免成立，不触发 `command_substitution`
+
+#### Scenario: for-body 迭代变量绑定 $(cat) 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `for f in openspec/specs/*/spec.md; do n=$(cat "$f"); echo "$n"; done`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`cat` 属 READ_ONLY_COMMANDS（B1），`"$f"` 绑定迭代变量（B2），迭代集 bounded（B3），无副作用（B4），绑定豁免成立
+
+#### Scenario: for-body 绑定 $(grep) 含非绑定路径仍判不可靠（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in a b c; do n=$(grep -c '^###' "$f" /etc/passwd); echo "$n"; done`，projectRoot 内（字面量迭代集，无 glob 分支拦截，`$()` 分支可达）
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——`$(grep ...)` 路径参数 `/etc/passwd` 非迭代变量且非项目内字面路径（B2 不满足），绑定豁免失败，回退原判定
+
+#### Scenario: for-body 绑定 $(grep) 含未绑定变量仍判不可靠（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in a b c; do n=$(grep -c '^###' "$f" $OTHER); echo "$n"; done`，projectRoot 内（字面量迭代集）
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——`$(grep ...)` 路径参数含未绑定用户变量 `$OTHER`（B2 不满足），绑定豁免失败，回退原判定
+
+#### Scenario: for-body 绑定 $(rm) 写命令仍判不可靠（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in a b c; do n=$(rm "$f"); echo "$n"; done`，projectRoot 内（字面量迭代集）
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——`$(rm ...)` 顶层命令 `rm` 非只读（B1 不满足），绑定豁免失败，回退原判定
+
+#### Scenario: for 迭代集出界时绑定豁免不适用（本 change 新增反例）
+
+- **WHEN** bash 命令为 `for f in /etc/passwd /etc/shadow; do n=$(grep -c '^#' "$f"); echo "$n"; done`（绝对路径字面量迭代集，无 glob 分支拦截，`$()` 分支可达）
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——迭代集含绝对路径 `/etc/passwd`、`/etc/shadow`，不在 projectRoot 内（B3 不满足），绑定豁免失败，回退原判定（注：用绝对路径字面量迭代而非 glob 出界，是为了让 `$()` 分支真正执行以测试 B3；glob 出界迭代会被「有界 glob 免不可靠标记」的 glob 分支先拦截，reason 为 glob_expansion，测试不到 B3）
+
+#### Scenario: 顶层 $(grep /etc/passwd) 无 for 上下文仍判不可靠（本 change 新增反例，安全边界）
+
+- **WHEN** bash 命令为 `echo "$(grep -c '^#' /etc/passwd)"`，无 for 循环
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——`grep` 不在 `SUBSTITUTION_READONLY_CMDS` 白名单，且无 for-body 上下文（for-body 绑定豁免不适用），维持原 `command_substitution` 判定——**本 change 不改变顶层读替换的安全边界**
+
+#### Scenario: 顶层 $(cat /etc/passwd) 无 for 上下文仍判不可靠（本 change 新增反例，安全边界）
+
+- **WHEN** bash 命令为 `echo "$(cat /etc/passwd)"`，无 for 循环
+- **THEN** 提取结果为 `{ reliable: false, reason: "command_substitution" }`——`cat` 不在白名单，无 for-body 上下文，维持原判定
 
 ### Requirement: shell 转发器的长参数前缀判不可靠
 
