@@ -1353,6 +1353,52 @@ test("helper: isReadOnlyWithArgs delegates others to READ_ONLY_COMMANDS", () => 
   assert.equal(isReadOnlyWithArgs("python", ["-c", "print(1)"]), false);
 });
 
+// -------- find-exec-readonly-payload: payload-aware -exec/-execdir --------
+// RED: -exec/-execdir 后跟只读载荷（cat/wc/echo）应判 reliable；写载荷
+//（rm）、未知载荷（sh）、无命令载荷（{}）仍判 find_write_flag（fail-closed）。
+
+test("find-exec-readonly-payload: -exec cat 只读载荷判 reliable", () => {
+  const result = extractBashTargets('find src/ -name "*.tmp" -exec cat {} \\;', "/proj");
+  const errReason = (result as { reason?: string }).reason;
+  assert.equal(result.reliable, true, `expected reliable, got ${errReason ?? "no reason"}`);
+});
+
+test("find-exec-readonly-payload: -exec wc 只读载荷判 reliable", () => {
+  const result = extractBashTargets('find src/ -name "*.log" -exec wc -l {} \\;', "/proj");
+  const errReason = (result as { reason?: string }).reason;
+  assert.equal(result.reliable, true, `expected reliable, got ${errReason ?? "no reason"}`);
+});
+
+test("find-exec-readonly-payload: -execdir cat 只读载荷判 reliable", () => {
+  const result = extractBashTargets('find src/ -name "*.log" -execdir cat {} \\;', "/proj");
+  const errReason = (result as { reason?: string }).reason;
+  assert.equal(result.reliable, true, `expected reliable, got ${errReason ?? "no reason"}`);
+});
+
+test("find-exec-readonly-payload: -exec cat + 终止只读载荷判 reliable", () => {
+  const result = extractBashTargets('find src/ -name "*.ts" -exec cat {} +', "/proj");
+  const errReason = (result as { reason?: string }).reason;
+  assert.equal(result.reliable, true, `expected reliable, got ${errReason ?? "no reason"}`);
+});
+
+test("find-exec-readonly-payload: -exec echo 无害载荷判 reliable", () => {
+  const result = extractBashTargets('find src/ -name "*.tmp" -exec echo {} \\;', "/proj");
+  const errReason = (result as { reason?: string }).reason;
+  assert.equal(result.reliable, true, `expected reliable, got ${errReason ?? "no reason"}`);
+});
+
+test("find-exec-readonly-payload: -exec sh 写载荷仍判 unreliable", () => {
+  const result = extractBashTargets('find src/ -name "*.tmp" -exec sh -c \'rm "$1"\' _ {} \\;', "/proj");
+  assert.equal(result.reliable, false, "expected unreliable");
+  assert.equal(result.reason, "find_write_flag");
+});
+
+test("find-exec-readonly-payload: -exec {} 无命令载荷仍判 unreliable", () => {
+  const result = extractBashTargets('find src/ -name "*.tmp" -exec {} \\;', "/proj");
+  assert.equal(result.reliable, false, "expected unreliable");
+  assert.equal(result.reason, "find_write_flag");
+});
+
 test("helper: isDevSocketOrFd returns true for network sockets and numeric fds", () => {
   assert.equal(isDevSocketOrFd("/dev/tcp/1.2.3.4/4444"), true);
   assert.equal(isDevSocketOrFd("/dev/tcp/attacker.com/53"), true);

@@ -650,17 +650,25 @@ type ExtractResult =
 
 **find 的参数条件性只读判定**：当命令名为 `find` 时，MUST 检查其所有参数——若任一参数是以下写操作标志之一，MUST NOT 判为只读（glob 判定条件 3 不满足）：
 
-- `-delete`（就地删除匹配文件）
-- `-exec`（对匹配文件执行任意命令）
-- `-execdir`（在匹配文件所在目录执行任意命令）
-- `-ok`（交互式对匹配文件执行任意命令）
-- `-okdir`（交互式在匹配文件所在目录执行任意命令）
+- `-delete`（就地删除匹配文件）——始终判写，不看载荷
+- `-exec`（对匹配文件执行任意命令）——**载荷感知（payload-aware）**：`-exec` 后的载荷命令名（`;` 或 `+` 终止符之前的首个非 flag token）属于 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS 时，该 `-exec` 不判写；否则判写
+- `-execdir`（在匹配文件所在目录执行任意命令）——**载荷感知**：判定同 `-exec`
+- `-ok`（交互式对匹配文件执行任意命令）——始终判写（交互式，无法静态确定用户答复）
+- `-okdir`（交互式在匹配文件所在目录执行任意命令）——始终判写（交互式，无法静态确定用户答复）
+
+`-exec`/`-execdir` 的**载荷命令名**按以下规则确定，任一不满足则维持判写（fail-closed）：
+
+1. 载荷命令名是 `-exec`/`-execdir` 之后到终止符（`;` 或 `+`）之前的首个 token；token 以 `/` 开头时取 basename（`/bin/cat` → `cat`）
+2. 载荷命令名在终止符之前**必须存在**且不是 `{}`、不是 flag（以 `-` 开头）——`find . -exec {} \;`、`find . -exec \;` 均判写
+3. 载荷命令名属于 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS → 不判写；否则（`rm`/`sh`/`bash`/`xargs`/`eval`/`chmod`/`mv`/未知命令等）→ 判写
 
 `find` 的其他参数（`-name`/`-type`/`-size`/`-mtime`/`-user`/`-group`/`-newer`/`-newermt`/`-maxdepth`/`-mindepth` 等 100+ 个过滤条件）MUST 视为不改变 `find` 的只读性质。
 
 **for 循环体只读判定**：当命令名为 `for` 且条件 3c 的前置（结构完整 + 迭代集含 glob）满足时，MUST 检查该 for 循环的 BODY 是否只读。BODY 的只读判定复用"字面量 for 循环豁免"requirement 中的 BODY 只读规则——BODY 里的每条命令都必须是 read-only（READ_ONLY_COMMANDS 集合、SILENT_COMMANDS、HARMLESS_BUILTINS，或 `find` 且通过 find 的参数条件性只读判定）。
 
 **理由**：`for` 循环的迭代集 glob（如 `for d in openspec/specs/*/; do ls "$d"; done`）在实际文件访问上等价于 shell 展开后的 `ls openspec/specs/1/ openspec/specs/2/ ...`——展开的目标集合完全位于项目内（因为 glob 前缀被条件 2 限定在项目内），且循环体只做 read-only 操作（通过条件 3c 的 BODY 只读判定）。原实现把 `for` 当作"不在 READ_ONLY_COMMANDS"的普通命令处理，导致迭代集内的 glob 被 `scanUnreliable` 提前触发 `glob_expansion`，永远走不到 `scanControlFlow` 的字面量 for 循环豁免。本条件 3c 直接在 `isBoundedGlobSafe` 层面处理该情形，避免 `scanUnreliable` 与 `scanControlFlow` 的短路冲突。
+
+**find 载荷感知（payload-aware）判定的理由（本 change 新增）**：原实现把 `-exec`/`-execdir` 一律判写——即使载荷命令是 `cat`/`wc`/`grep` 这类已知只读命令（`find . -name '*.ts' -exec cat {} \;` 对匹配文件仅读取，无写副作用）。实测确认（2026-11-02）本项目对该形态判 `find_write_flag`（误报），与宿主 bash 审批层的同类弹窗一致。本 change 在「载荷命令名 ∈ READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS」这一窄条件下放宽，写载荷（`rm`）、未知载荷（`sh`/`bash`/`xargs`）、`{}` 直接执行、`+` 终止、交互式 `-ok`/`-okdir` 均维持判写（fail-closed）。放宽不弱化对真实写操作的保守判定，属局部优化且不全局失调。
 
 **空 prefix 放宽的理由**：条件 2 原本要求 glob 前缀完全位于 projectRoot 内部，并显式拒绝空 prefix（"Empty prefix means the glob is at token start"）。本 change 引入两处情形 A/B 的放宽：
 
@@ -680,7 +688,9 @@ type ExtractResult =
 - BODY 含非只读命令（如 `for d in openspec/*/; do curl "$d"; done`）
 - for 循环结构不完整（如 `for d in openspec/*/; do ls "$d"` 无 `; done`）
 - 迭代集全字面量（如 `for i in a b c; do echo "$i"; done`）——本条件不适用，走"字面量 for 循环豁免"requirement
-- `find` 含写操作参数（如 `find src/ -name "*.bak" -delete`、`find . -name "*.log" -exec rm {} \;`）
+- `find` 含写操作参数（如 `find src/ -name "*.bak" -delete`、`find . -name "*.log" -exec rm {} \;`）——`-delete` 始终判写；`-exec rm` 载荷 `rm` 是写载荷，判写（本 change 后仍成立）
+- `find -exec`/`-execdir` 载荷命令名不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS（如 `find . -exec sh -c 'rm $1' _ {} \;`、`find . -exec chmod 600 {} \;`）
+- `find -exec`/`-execdir` 载荷命令名缺失或为 `{}`/flag（如 `find . -exec {} \;`、`find . -exec \;`）
 - 空 prefix 迭代词以绝对路径标志开头（如 `for f in /etc/*.conf; do cat "$f"; done`、`for f in ~/*.conf; do cat "$f"; done`）
 - **情形 B 的写命令空 prefix glob**（如 `rm *.log`、`tar xzf *.tgz`）——命令不满足条件 3 只读判定，空 prefix 放宽不适用，仍判 `glob_expansion`
 - **情形 B 的绝对路径前缀 glob**（如 `ls /etc/*.conf`、`ls ~/*.md`）——glob 以绝对路径标志开头，情形 B 不适用
@@ -715,17 +725,52 @@ type ExtractResult =
 #### Scenario: `find -exec` 在 glob 上下文触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec rm {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 是写操作 flag
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 载荷 `rm` 是写载荷（不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS），判写，条件 3 不满足（本 change 后仍成立：写载荷不因载荷感知放宽）
 
 #### Scenario: `find -execdir` 在 glob 上下文触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.log" -execdir cat {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-execdir` 是写操作 flag
+- **THEN** 提取结果为 `{ reliable: true }`——`-execdir` 载荷 `cat` 属于 READ_ONLY_COMMANDS，载荷感知判定不判写，条件 3 满足（本 change：场景名沿用既有 anchor，行为从误判 glob_expansion 修正为只读载荷放行）
 
 #### Scenario: `find -ok` 在 glob 上下文触发 glob_expansion
 
 - **WHEN** bash 命令为 `find src/ -name "*.tmp" -ok rm {} \;`
-- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-ok` 是写操作 flag
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-ok` 是交互式写操作 flag，始终判写
+
+#### Scenario: `find -exec cat` 只读载荷自动放行
+
+- **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec cat {} \;`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `cat` 属于 READ_ONLY_COMMANDS，载荷感知判定不判写，条件 3 满足（本 change 新增：原实现误判 glob_expansion）
+
+#### Scenario: `find -exec wc` 只读载荷自动放行
+
+- **WHEN** bash 命令为 `find src/ -name "*.log" -exec wc -l {} \;`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`-exec` 载荷 `wc` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增）
+
+#### Scenario: `find -execdir cat` 只读载荷自动放行
+
+- **WHEN** bash 命令为 `find src/ -name "*.log" -execdir cat {} \;`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`-execdir` 载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增：原实现误判 glob_expansion）
+
+#### Scenario: `find -exec cat {} +` 加号终止只读载荷自动放行
+
+- **WHEN** bash 命令为 `find src/ -name "*.ts" -exec cat {} +`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——`+` 终止符与 `;` 等价处理，载荷 `cat` 属于 READ_ONLY_COMMANDS，不判写（本 change 新增）
+
+#### Scenario: `find -exec echo` HARMLESS 载荷自动放行
+
+- **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec echo {} \;`，projectRoot 内
+- **THEN** 提取结果为 `{ reliable: true }`——载荷 `echo` 属于 HARMLESS_BUILTINS，不判写（本 change 新增）
+
+#### Scenario: `find -exec sh -c` 载荷仍触发 glob_expansion
+
+- **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec sh -c 'rm "$1"' _ {} \;`
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——载荷 `sh` 不在 READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS（shell 转发器，可执行任意命令），判写（本 change 新增反例）
+
+#### Scenario: `find -exec {}` 无命令载荷仍触发 glob_expansion
+
+- **WHEN** bash 命令为 `find src/ -name "*.tmp" -exec {} \;`
+- **THEN** 提取结果为 `{ reliable: false, reason: "glob_expansion" }`——`-exec` 后无载荷命令名（首个 token 是 `{}`），判写（本 change 新增反例）
 
 #### Scenario: 写命令内的 glob 仍触发 glob_expansion
 

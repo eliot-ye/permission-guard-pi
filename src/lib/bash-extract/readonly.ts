@@ -4,7 +4,7 @@
 import { toAbsolutePath, isInside } from "../path-utils.ts";
 
 import { splitCommands, splitPipelines, tokenize } from "./parse.ts";
-import { isForBodyReadOnly } from "./silent.ts";
+import { isForBodyReadOnly, HARMLESS_BUILTINS } from "./silent.ts";
 
 export const READ_ONLY_COMMANDS = new Set([
   "cat", "head", "tail", "wc", "grep",
@@ -37,17 +37,53 @@ export const FIND_WRITE_FLAGS = new Set([
 /**
  * Determine whether a `find` invocation is read-only based on its arguments.
  *
- * Returns false if any argument exactly matches one of FIND_WRITE_FLAGS.
- * Quoted literal forms (`find . -name "-delete"`) are tokens like
- * `"-delete"` with quotes preserved — they do NOT exactly match the bare
- * `-delete` string, so they are correctly treated as literals.
+ * `-delete` / `-ok` / `-okdir` are unconditionally write (no payload / interactive).
+ * `-exec` / `-execdir` are payload-aware: they are write only when the payload
+ * command (the first token after the flag, before `;`/`+`) is NOT a known
+ * read-only or harmless command. Quoted literal forms (`find . -name "-delete"`)
+ * are tokens like `"-delete"` with quotes preserved — they do NOT exactly match
+ * the bare `-delete` string, so they are correctly treated as literals.
+ *
+ * Fail-closed: if the payload command cannot be determined (missing, `{}`, a
+ * flag, or unknown), the flag is treated as write.
  */
 
 export function isFindReadOnly(tokens: string[]): boolean {
-  for (const t of tokens) {
-    if (FIND_WRITE_FLAGS.has(t)) return false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    // Unconditionally write flags: `-delete` deletes in place (no payload),
+    // `-ok`/`-okdir` are interactive (user answer not statically determinable).
+    if (t === "-delete" || t === "-ok" || t === "-okdir") return false;
+    // Payload-aware flags: write only if the payload command is not read-only.
+    if (t === "-exec" || t === "-execdir") {
+      if (!isReadonlyExecPayload(tokens[i + 1])) return false;
+    }
   }
   return true;
+}
+
+/**
+ * Determine whether a `find -exec`/`-execdir` payload command (the first token
+ * after the flag, before the `;`/`+` terminator) is a known read-only or
+ * harmless command.
+ *
+ * Returns false (fail-closed → flag treated as write) when:
+ *   - payloadToken is undefined or empty (missing payload, e.g. `find . -exec \;`)
+ *   - payloadToken starts with `-` (a flag, e.g. malformed `find . -exec -name ...`)
+ *   - payloadToken is `{}` (execute the matched file itself — arbitrary)
+ *   - payloadToken is `\;` or `+` (terminator with no payload command)
+ *   - payloadToken is not in READ_ONLY_COMMANDS ∪ HARMLESS_BUILTINS
+ *
+ * A path-prefixed payload (`/bin/cat`) is matched by basename.
+ */
+
+function isReadonlyExecPayload(payloadToken: string | undefined): boolean {
+  if (!payloadToken || payloadToken.startsWith("-") || payloadToken === "{}" ||
+      payloadToken === "\\;" || payloadToken === "+") {
+    return false;
+  }
+  const name = payloadToken.split("/").pop()!;
+  return READ_ONLY_COMMANDS.has(name) || HARMLESS_BUILTINS.has(name);
 }
 
 /**
