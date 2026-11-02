@@ -145,7 +145,7 @@ async function initSession(ctx: PictxLike, opts: PermissionExtensionOptions): Pr
   const trustedPath = join(opts.trustedDir, trustedFileName);
   const auditLogPath = join(opts.trustedDir, "logs", "permission-review.jsonl");
 
-  const trust = await createTrustStore(trustedPath);
+  const trust = await createTrustStore(trustedPath, projectRoot);
   const audit = createAuditLogger(auditLogPath);
 
   // i18n T5: read settings.json + detect lang at session start. Once

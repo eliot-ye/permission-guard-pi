@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { createTrustStore, type TrustStore, type Grant } from "../src/lib/trust.ts";
 
@@ -14,7 +14,7 @@ async function withTmpStore<T>(fn: (store: TrustStore, path: string) => Promise<
   const dir = await mkdtemp(join(tmpdir(), "pi-trust-"));
   try {
     const path = join(dir, "trusted.json");
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dir);
     return await fn(store, path);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -48,7 +48,7 @@ test("GM3: persistent_grant_survives_session_restart", async () => {
     const path = join(dir, "trusted.json");
 
     // First session: add persistent grant.
-    let store = await createTrustStore(path);
+    let store = await createTrustStore(path, dirname(path));
     await store.addPersistentGrant({
       projectHash: "hash1",
       action: "read",
@@ -57,7 +57,7 @@ test("GM3: persistent_grant_survives_session_restart", async () => {
     });
 
     // Simulate restart: create new store from same file.
-    store = await createTrustStore(path);
+    store = await createTrustStore(path, dirname(path));
 
     assert.equal(store.hasPersistentGrant("hash1", "read", "/abs/path"), true);
   } finally {
@@ -137,7 +137,7 @@ test("GM8: missing_trusted_json_is_treated_as_empty_grants", async () => {
   try {
     const path = join(dir, "trusted.json");
     // File does NOT exist
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dirname(path));
     assert.deepEqual(store.getAllPersistent(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -198,7 +198,7 @@ test("GM11: session_start_clears_session_grants_and_loads_persistent", async () 
   try {
     const path = join(dir, "trusted.json");
 
-    let store = await createTrustStore(path);
+    let store = await createTrustStore(path, dirname(path));
     store.addSessionGrant("h1", "read", "/p1");
     await store.addPersistentGrant({
       projectHash: "h1",
@@ -209,7 +209,7 @@ test("GM11: session_start_clears_session_grants_and_loads_persistent", async () 
     await store.flush();
 
     // New session - re-create store from same file.
-    store = await createTrustStore(path);
+    store = await createTrustStore(path, dirname(path));
 
     // Session grant should be gone.
     assert.equal(store.hasSessionGrant("h1", "read", "/p1"), false);
@@ -270,7 +270,7 @@ test("GM15: bash_persistent_grant_survives_session_restart", async () => {
       permission: "read_only",
     });
     // Simulate new session (recreate store from same file).
-    const store2 = await createTrustStore(path);
+    const store2 = await createTrustStore(path, dirname(path));
     assert.equal(store2.hasBashPersistentGrant("h1", cmd), true);
   });
 });
@@ -382,7 +382,198 @@ test("GM22: bash_grant_whitespace_normalized_session", async () => {
   await withTmpStore(async (store) => {
     store.addBashSessionGrant("h1", "echo hi", "shell_forwarder", "read_only");
     assert.equal(store.hasBashSessionGrant("h1", "echo  hi"), true, "session grant whitespace match");
-    assert.equal(store.hasBashSessionGrant("h1", "echo hi there"), false, "different args no match");
+    // echo is a text command (CMD_READ_FLAGS "text"): its positional args are
+    // plain text, ignored by keypoints — `echo hi there` has the same (empty)
+    // access set + no action, strictly keypoint-equivalent to `echo hi`.
+    assert.equal(store.hasBashSessionGrant("h1", "echo hi there"), true, "text args ignored → keypoint-equivalent");
+  });
+});
+
+// ============================================================
+// bash-grant-keypoints (GM23-GM35): keypoint-equivalence dual-track
+// ============================================================
+
+test("GM23: bash_persistent_grant_dual_write_command_and_keypoints", async () => {
+  // Dual-track write: a persistent grant carries BOTH commandHash (whole
+  // command, legacy anchor) and keypointsHash (keypoint equivalence).
+  await withTmpStore(async (store, path) => {
+    const cmd = "cd /proj && find openspec -type f | head -50";
+    await store.addBashPersistentGrant({
+      projectHash: "h1",
+      rawCommand: cmd,
+      reason: "cd_chdir",
+      permission: "read_only",
+    });
+    await store.flush();
+    const raw = await readFile(path, "utf8");
+    const parsed = JSON.parse(raw);
+    const g = parsed.bashGrants[0];
+    assert.equal(g.commandHash.length, 64, "commandHash written (whole command)");
+    assert.equal(g.keypointsHash.length, 64, "keypointsHash written (keypoints)");
+    assert.notEqual(g.keypointsHash, g.commandHash, "keypointsHash differs from commandHash");
+  });
+});
+
+test("GM23b: bash_persistent_grant_keypoint_hit_auto_allows", async () => {
+  // Keypoint-equivalent variant (head -50 → -60) hits the same grant.
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && find openspec -type f | head -50";
+    await store.addBashPersistentGrant({
+      projectHash: "h1",
+      rawCommand: cmd,
+      reason: "cd_chdir",
+      permission: "read_only",
+    });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && find openspec -type f | head -60"), true, "head -50/-60 keypoint-equivalent");
+  });
+});
+
+test("GM24: bash_legacy_grant_exact_command_match_still_hits", async () => {
+  // Legacy grant (no keypointsHash) falls back to exact commandHash match.
+  const dir = await mkdtemp(join(tmpdir(), "pi-trust-legacy-kp-"));
+  try {
+    const path = join(dir, "trusted.json");
+    // Pre-write a legacy trusted.json: bashGrants entries WITHOUT keypointsHash.
+    await writeFile(
+      path,
+      JSON.stringify({
+        grants: [],
+        bashGrants: [
+          {
+            projectHash: "h1",
+            commandHash: "a".repeat(64),
+            rawCommand: "cat /etc/hosts",
+            reason: "glob_expansion",
+            permission: "read_only",
+            createdAt: "2025-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const store = await createTrustStore(path, dirname(path));
+    // Exact same command hits (legacy whole-command match).
+    assert.equal(store.hasBashPersistentGrant("h1", "cat /etc/hosts"), true, "legacy exact command match");
+    // A different command must NOT hit the legacy grant (no keypoints, no
+    // automatic widening — authorization scope does not expand).
+    assert.equal(store.hasBashPersistentGrant("h1", "cat /etc/passwd"), false, "legacy grant not keypoint-widened");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GM24b: bash_legacy_session_grant_exact_command_match", async () => {
+  // Legacy session grant: dual-track write adds both keys; a whitespace
+  // variant hits via the whole-command normalized key (existing behavior).
+  await withTmpStore(async (store) => {
+    store.addBashSessionGrant("h1", "git status", "glob_expansion", "read_only");
+    assert.equal(store.hasBashSessionGrant("h1", "git status"), true, "exact match");
+    assert.equal(store.hasBashSessionGrant("h1", "git  status"), true, "whitespace normalized match");
+  });
+});
+
+// ============================================================
+// bash-grant-keypoints GM25-GM35: spec grant-memory scenarios
+// ============================================================
+
+test("GM25: 纯读flag值变化命中同一grant (head -50 vs -60)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && find openspec -type f | head -50";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && find openspec -type f | head -60"), true, "head -50/-60 equivalent");
+  });
+});
+
+test("GM25b: 纯读flag值变化命中同一grant (-type f vs -type d)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && find openspec -type f";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && find openspec -type d"), true, "-type f/-type d equivalent");
+  });
+});
+
+test("GM26: 增删fd重定向命中同一grant", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && cat openspec/.td-state/profile-tier.yaml 2>/dev/null";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && cat openspec/.td-state/profile-tier.yaml"), true, "fd redirect add/remove equivalent");
+  });
+});
+
+test("GM27: 不同路径不命中 (find src vs test)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && find src -type f";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && find test -type f"), false, "different path not equivalent");
+  });
+});
+
+test("GM28: cd落点不同不命中 (cd /a vs /b)", async () => {
+  await withTmpStore(async (store) => {
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: "cd /a && ls", reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /b && ls"), false, "cd landing differs → not equivalent");
+  });
+});
+
+test("GM29: shell glob位置参数保留 (cat *.ts vs *.go)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && cat src/*.ts";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "glob_expansion", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && cat src/*.go"), false, "glob positional differs → not equivalent");
+  });
+});
+
+test("GM30: 写重定向目标保留 (cat a.txt vs cat a.txt > /tmp/out)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && cat a.txt";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && cat a.txt > /tmp/out.txt"), false, "write redirect → not equivalent");
+  });
+});
+
+test("GM31: 语法级语义漂移不判等价", async () => {
+  await withTmpStore(async (store) => {
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: "git status", reason: "glob_expansion", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", 'bash -c "git status"'), false, "bash -c not equivalent");
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /tmp && git status"), false, "cd drift not equivalent");
+  });
+});
+
+test("GM32: cd变量落点降级 (cd $HOME)", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd $HOME && cat x.yaml";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd $HOME && cat x.yaml"), true, "cd $HOME downgraded → same grant");
+  });
+});
+
+test("GM33: 写flag变化不命中 (rm -r vs -rf)", async () => {
+  await withTmpStore(async (store) => {
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: "rm -r /tmp/x", reason: "glob_expansion", permission: "read_write" });
+    assert.equal(store.hasBashPersistentGrant("h1", "rm -rf /tmp/x"), false, "write flag differs → not equivalent");
+  });
+});
+
+test("GM34: find -name vs cat glob 不误放行", async () => {
+  await withTmpStore(async (store) => {
+    const cmd = "cd /proj && find openspec -name '*.ts' | head -50";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd /proj && cat openspec/*.ts"), false, "find -name internal match ≠ cat shell glob");
+  });
+});
+
+test("GM35: cd家目录/相对落点正常解析", async () => {
+  await withTmpStore(async (store) => {
+    // ~ expands to home dir — same cd:<abs> landing → same grant.
+    const cmd = "cd ~ && cat x.yaml";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd ~ && cat x.yaml"), true, "cd ~ resolves to same abs landing");
+  });
+  await withTmpStore(async (store) => {
+    // Relative landing resolves against the same projectRoot → same grant.
+    const cmd = "cd src && cat x.yaml";
+    await store.addBashPersistentGrant({ projectHash: "h1", rawCommand: cmd, reason: "cd_chdir", permission: "read_only" });
+    assert.equal(store.hasBashPersistentGrant("h1", "cd src && cat x.yaml"), true, "cd src resolves to same abs landing");
   });
 });
 
@@ -506,7 +697,7 @@ test("T-TRUST-LA-3: legacy_persistent_grant_no_author_defaults_to_by_person", as
       }),
       "utf8",
     );
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dirname(path));
     assert.equal(
       store.lookupGrantAuthor("hash1", "read", "/abs/path"),
       "by_person",
@@ -577,7 +768,7 @@ test("T-TRUST-W3: first_write_after_legacy_load_adds_author_to_all_entries", asy
       "utf8",
     );
 
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dirname(path));
 
     // Write a new grant without author — the store should default it.
     await store.addPersistentGrant({
@@ -622,7 +813,7 @@ test("T-TRUST-M3: migration_does_not_trigger_disk_write", async () => {
     const before = await readFile(path, "utf8");
 
     // Load the store — this runs the in-memory migration but MUST NOT write to disk.
-    await createTrustStore(path);
+    await createTrustStore(path, dirname(path));
 
     const after = await readFile(path, "utf8");
     assert.equal(after, before, "disk file must remain byte-identical after load-only");
@@ -653,7 +844,7 @@ test("T-TRUST-M2: existing_author_field_preserved_on_load", async () => {
       }),
       "utf8",
     );
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dirname(path));
     const list = store.getAllPersistent();
     assert.equal(list.length, 1);
     assert.equal(list[0].author, "by_person", "author must be preserved, not overwritten");

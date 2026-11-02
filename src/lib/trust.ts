@@ -14,7 +14,9 @@
 
 import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 import { bashCommandHash } from "./path-utils.ts";
+import { bashCommandKeypoints } from "./bash-extract/keypoints.ts";
 
 /**
  * Best-effort chmod. Skips when:
@@ -85,6 +87,12 @@ export interface BashGrant {
   projectHash: string;
   /** sha256(rawCommand), 64 lowercase hex chars. Stable identity of the command. */
   commandHash: string;
+  /** sha256(command keypoints), 64 lowercase hex chars. Keypoint-equivalence identity.
+   *  New grants (bash-grant-keypoints) carry both commandHash (whole command, for
+   *  audit-consistency anchoring) and keypointsHash (keypoint matching). Legacy grants
+   *  without keypointsHash fall back to exact commandHash matching (dual-track, no
+   *  migration — user decision). */
+  keypointsHash?: string;
   /** Raw command string. Stored for audit, UI display, and revocation review. */
   rawCommand: string;
   /** Original extraction reason (glob_expansion, shell_forwarder, etc.) */
@@ -154,7 +162,10 @@ function hashCommand(rawCommand: string): string {
   return bashCommandHash(rawCommand);
 }
 
-export async function createTrustStore(trustedFilePath: string): Promise<TrustStore> {
+export async function createTrustStore(
+  trustedFilePath: string,
+  projectRoot: string,
+): Promise<TrustStore> {
   // Ensure parent dir exists with 0o700 permissions. `mode: 0o700` only
   // applies when mkdir actually creates the directory; existing dirs keep
   // their mode. Explicitly chmod afterwards so an existing permissive dir
@@ -204,6 +215,19 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
   // Bash-command session grants (in-memory).
   const bashSessionGrants = new Set<string>();
 
+  // ---- keypoints dual-track helpers (design.md Decision 5) ----
+  // keypointsHash: sha256 of the command keypoints (bashCommandKeypoints).
+  // Two commands with equal keypoints access the same files with the same
+  // actions — keypoint-equivalent. Needs projectRoot (relative path
+  // absolutization), captured here from createTrustStore's parameter.
+  const keypointsHash = (rawCommand: string): string =>
+    createHash("sha256").update(bashCommandKeypoints(rawCommand, projectRoot)).digest("hex");
+
+  // Session-set key: <projectHash>|<keypointsHash>. Distinct from bashKey
+  // (<projectHash>|<commandHash>) so the dual-track session set holds both.
+  const bashKeypointsKey = (projectHash: string, rawCommand: string): string =>
+    `${projectHash}|${keypointsHash(rawCommand)}`;
+
   return {
     path: trustedFilePath,
 
@@ -250,20 +274,30 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
     },
 
     hasBashSessionGrant: (projectHash, rawCommand) => {
-      return bashSessionGrants.has(bashKey(projectHash, rawCommand));
+      // Dual-track: keypoint hit (new grant) || whole-command hit (legacy).
+      return (
+        bashSessionGrants.has(bashKeypointsKey(projectHash, rawCommand)) ||
+        bashSessionGrants.has(bashKey(projectHash, rawCommand))
+      );
     },
 
     addBashSessionGrant: (projectHash, rawCommand, _reason, _permission) => {
       // Reason and permission are recorded for future lookup but not part
-      // of the session key (session grants are always exact-command match).
+      // of the session key. Dual-track write: whole-command key (legacy
+      // exact-match anchor) + keypoint key (new keypoint-equivalence match).
       void _reason;
       void _permission;
       bashSessionGrants.add(bashKey(projectHash, rawCommand));
+      bashSessionGrants.add(bashKeypointsKey(projectHash, rawCommand));
     },
 
 
 
     hasBashPersistentGrant: (projectHash, rawCommand) => {
+      const kpKey = bashKeypointsKey(projectHash, rawCommand);
+      if (persistentBashGrants.some((g) => g.keypointsHash && `${g.projectHash}|${g.keypointsHash}` === kpKey)) {
+        return true;
+      }
       const key = bashKey(projectHash, rawCommand);
       return persistentBashGrants.some((g) => bashKey(g.projectHash, g.rawCommand) === key);
     },
@@ -278,6 +312,9 @@ export async function createTrustStore(trustedFilePath: string): Promise<TrustSt
         ...grant,
         author: grant.author ?? "by_person",
         commandHash: hashCommand(grant.rawCommand),
+        // Dual-track: whole-command hash (legacy anchor) + keypoint hash
+        // (new keypoint-equivalence match).
+        keypointsHash: keypointsHash(grant.rawCommand),
         createdAt: new Date().toISOString(),
       });
       await atomicWrite(trustedFilePath, { grants: persistentGrants, bashGrants: persistentBashGrants });

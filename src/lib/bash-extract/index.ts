@@ -10,3 +10,4 @@ export { isDevSocketOrFd, isReadOnlyWithArgs, isFindReadOnly, isBoundedGlobSafe,
 export { isForwarderStageSafe } from "./shell-forwarder.ts";
 export { isSubstitutionReadOnlyAt, SUBSTITUTION_READONLY_CMDS } from "./scan.ts";
 export { isSilentCommand, isAnyUnreliableCommand, isSedReadonlyForm, SILENT_COMMANDS, UNRELIABLE_COMMANDS } from "./silent.ts";
+export { bashCommandKeypoints } from "./keypoints.ts";

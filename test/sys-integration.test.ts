@@ -1122,3 +1122,76 @@ test("SYS-SOFT-FILE: soft persistent grant is keyed by file, not directory", asy
     },
   );
 });
+
+// ============================================================
+// bash-grant-keypoints (SYS-KP): keypoint-equivalence cross-boundary
+// ============================================================
+
+test("SYS-KP: 关键点等价变体跨分系统整合 auto-allow + audit 一致", async () => {
+  // Cross-boundary integration (td-apply 步骤 6.2):
+  //   trust (keypoint hash) ← bash-extract (keypoint derivation)
+  //   → audit (commandHash consistency, B5)
+  await withSandbox(
+    async ({ globalConfig }) => {
+      await writeFile(globalConfig, "{}");
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const configPaths = {
+        global: join(trustedDir, "..", "global", "permission.json"),
+        project: join(projectRoot, ".pi", "permission.json"),
+        local: join(projectRoot, ".pi", "local", "permission.json"),
+      };
+
+      // Session 1: grant the base command persistent (user allows always).
+      const base = `cd ${projectRoot} && find openspec -type f | head -50`;
+      const s1 = createMockPi({
+        projectRoot,
+        uiChoice: async () => UI.alwaysAllowCmd,
+      });
+      registerPermissionGate(s1.pi, { trustedDir, configPaths });
+      const r1 = await fireToolCall(s1.pi, s1.ctx, {
+        toolName: "bash",
+        toolCallId: "tc-kp-1",
+        input: { command: base },
+      });
+      assert.equal(r1, undefined, "first prompt allowed, no block");
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Session 2: keypoint-equivalent variant (head -50 → -60) must
+      // auto-allow from the persistent grant (no prompt).
+      const variant = `cd ${projectRoot} && find openspec -type f | head -60`;
+      let promptCount = 0;
+      const s2 = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          promptCount += 1;
+          return UI.deny;
+        },
+      });
+      registerPermissionGate(s2.pi, { trustedDir, configPaths });
+      const r2 = await fireToolCall(s2.pi, s2.ctx, {
+        toolName: "bash",
+        toolCallId: "tc-kp-2",
+        input: { command: variant },
+      });
+      assert.equal(r2, undefined, "keypoint-equivalent variant auto-allows (no prompt)");
+      assert.equal(promptCount, 0, "variant must NOT prompt");
+
+      // Dual-track persistence integration: trusted.json grant carries BOTH
+      // commandHash (whole command, legacy anchor + audit-consistency) and
+      // keypointsHash (keypoint equivalence). Audit B5 commandHash-consistency
+      // for the truncation case is covered by the existing ALP4 test (audit
+      // writes commandHash only when the command is truncated to 511 chars);
+      // this change does not modify the audit channel.
+      await new Promise((r) => setTimeout(r, 100));
+      const trustedJson = JSON.parse(
+        await readFile(join(trustedDir, "trusted.json"), "utf8").catch(() => "{}"),
+      );
+      const g = trustedJson.bashGrants?.[0];
+      assert.ok(g, "expected a persisted bash grant");
+      assert.equal(g.commandHash.length, 64, "grant commandHash written (whole command)");
+      assert.equal(g.keypointsHash.length, 64, "grant keypointsHash written (keypoints)");
+      assert.notEqual(g.keypointsHash, g.commandHash, "keypointsHash differs from commandHash");
+    },
+  );
+});

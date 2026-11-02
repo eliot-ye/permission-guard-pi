@@ -1746,7 +1746,7 @@ test("T-EXT-G1: path_grant_memory_hit_produces_auto_allow_decision", async () =>
   const dir = await mkdtemp(join(tmpdir(), "pi-ext-g1-"));
   try {
     const path = join(dir, "trusted.json");
-    const store = await createTrustStore(path);
+    const store = await createTrustStore(path, dir);
     await store.addPersistentGrant({
       projectHash: "projA",
       action: "read",
