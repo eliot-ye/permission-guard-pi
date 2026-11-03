@@ -9,7 +9,7 @@ import { scanUnreliable } from "./scan.ts";
 import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir, shouldTrackCdCwd } from "./shell-forwarder.ts";
 import { toAbsolutePath } from "../path-utils.ts";
 import { GIT_BLOB_OK_SUBCOMMANDS, NPM_RUN_OK_SCRIPTS, SILENT_ALLOW_ALL, SILENT_COMMANDS, isAnyUnreliableCommand, isSedReadonlyForm, isSilentCommand, isSilentGo, isSilentNpx, isSilentTsc, looksLikeGitBlobToken, looksLikeRepoRelativePath } from "./silent.ts";
-import { COMMAND_TABLE } from "./extractors.ts";
+import { COMMAND_TABLE, canExtractBareDir, readExtract, readExtractWithBareDir } from "./extractors.ts";
 
 export function extractBashTargets(rawCommand: string, projectRoot: string, env: NodeJS.ProcessEnv = process.env): ExtractResult {
   // 0. `find` write flag guard: `find -delete` / `-exec` / `-execdir` /
@@ -331,7 +331,17 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
       // COMMAND_TABLE takes precedence over SILENT_COMMANDS.
       const extractor = COMMAND_TABLE[cmdName];
       if (extractor) {
-        extractor(tokens, targets, resolveBase);
+        // bareDirOk：cd 跟踪豁免（D2a，trackCd=true）且命令可提取裸词目录
+        // （canExtractBareDir）时，传 bareDirOk=true——readExtract 把裸词目录
+        // 经 resolveBase 解析为 read target（否则 0-target 静默放行洞）。
+        // 按 D4 身份分派：bareDirOk 是 readExtract 函数签名层面的可选参（非
+        // Extractor 类型扩展），仅当 extractor === readExtract 时传（readExtract
+        // 是唯一需要 bareDirOk 的 extractor，身份分派是刻意权衡）。
+        if (trackCd && canExtractBareDir(cmdName) && extractor === readExtract) {
+          readExtractWithBareDir(tokens, targets, resolveBase, true);
+        } else {
+          extractor(tokens, targets, resolveBase);
+        }
       } else if (isSilentCommand(cmdName, tokens.slice(1))) {
         // Silent: 0 target, no unreliable flag.
       }

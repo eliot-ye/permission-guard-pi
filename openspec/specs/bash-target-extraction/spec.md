@@ -1902,7 +1902,7 @@ type ExtractResult =
 
 ### Requirement: cd cwd 变更判不可靠
 
-**重定向 token 的位置参数收集细化（本 change 新增）**：cd 跟踪豁免与全绝对下游豁免的路径引用判定（`collectStagePathRefs`）MUST NOT 把「重定向形态 token」当位置参数收集——`tokenize` 不拆分 `2>/dev/null`、`>foo`、`>>foo`、`2>&1`、`<in`、`<<EOF` 等形态（实测 `tokenize("ls /abs/x 2>/dev/null")` → `["ls","/abs/x","2>/dev/null"]`），而重定向目标已由 `collectStagePathRefs` 末尾的重定向扫描单独提取（`>`/`>>`/`2>`/`2>>`/`2>&`/`<`/`<<` 逐字符扫描并提取 target）。位置参数循环对这些 token 的重复收集是多余且有害的——它把 `2>/dev/null` 整串当非绝对引用（`looksLikePath("2>/dev/null")` 为 false），使 D2a 条件 9「不可提取裸词排除」与 D2b「全部路径引用绝对」双双命中，导致 `cd <绝对> && ls <绝对路径> 2>/dev/null` 这类纯 `&&` 链 + 全绝对下游命令误判 `cd_chdir` 弹窗，违反「全绝对下游豁免」既有契约。
+**重定向 token 的位置参数收集细化（前序 change 引入）**：cd 跟踪豁免与全绝对下游豁免的路径引用判定（`collectStagePathRefs`）MUST NOT 把「重定向形态 token」当位置参数收集——`tokenize` 不拆分 `2>/dev/null`、`>foo`、`>>foo`、`2>&1`、`<in`、`<<EOF` 等形态（实测 `tokenize("ls /abs/x 2>/dev/null")` → `["ls","/abs/x","2>/dev/null"]`），而重定向目标已由 `collectStagePathRefs` 末尾的重定向扫描单独提取（`>`/`>>`/`2>`/`2>>`/`2>&`/`<`/`<<` 逐字符扫描并提取 target）。位置参数循环对这些 token 的重复收集是多余且有害的——它把 `2>/dev/null` 整串当非绝对引用（`looksLikePath("2>/dev/null")` 为 false），使 D2a 条件 9「不可提取裸词排除」与 D2b「全部路径引用绝对」双双命中，导致 `cd <绝对> && ls <绝对路径> 2>/dev/null` 这类纯 `&&` 链 + 全绝对下游命令误判 `cd_chdir` 弹窗，违反「全绝对下游豁免」既有契约。
 
 **重定向 token 的识别判据**：仅跳过「目标已由重定向扫描提取」或「确无文件目标」的形态，**逐项对齐扫描的实际提取覆盖**：
 
@@ -1918,12 +1918,12 @@ type ExtractResult =
 **跳过安全论证**：跳过的 token 其重定向目标已由重定向扫描提取为 ref，各形态结论：
 
 - `2>/dev/null` → 扫描提取 `/dev/null`（绝对，`isExplicitAbsolutePath` 为 true，不构成 D2b 障碍；`/dev/*` 在 extractRedirects 写分支被静默跳过，不加入 targets）→ 无碍。
-- `1>rel.txt` / `3>rel.txt` / `2>rel.txt` → 扫描提取 `rel.txt`（有扩展名 → `looksLikePath=true`，条件 9 不触发）。该形态在 cd 链下走 **D2a（cd-tracking）豁免成立**：`rel.txt` 经 `resolveBase` 解析为 post-cd 写目标（`reliable:true`，写目标提取），与现状一致（实测现状 `1>rel.txt`/`3>rel.txt`/`2>rel.txt` 均已 `reliable:true` 且 `rel.txt` 被提取为 write target）——本判据不改变其行为，仅消除「无扩展名目标（如 `2>/dev/null`）依赖 `looksLikePath` 碰巧」的不稳定性。
+- `1>rel.txt` / `3>rel.txt` / `2>rel.txt` → 扫描提取 `rel.txt`（有扩展名 → `looksLikePath=true`，条件 9 不触发）。该形态在 cd 链下走 **D2a（cd-tracking）豁免成立**：`rel.txt` 经 `resolveBase` 解析为 post-cd 写目标（`reliable:true`，写目标提取），与现状一致——本判据不改变其行为，仅消除「无扩展名目标（如 `2>/dev/null`）依赖 `looksLikePath` 碰巧」的不稳定性。
 - `>foo` / `<in` → 扫描提取 `foo`/`in`（相对，`hasCwdRelativePathRef` 命中 → D2b 排除；D2a 条件 9 `looksLikePath` 为 false）→ 保守弹窗，正确。
 - `2>&1` → fd 复制，重定向扫描明确跳过 → 无 ref → 无碍。
 - `<<EOF` → heredoc 形态（`splitCommands` 可能拆分其内容为独立片段，本判据不跳过 `<<` 前缀——保守维持现状 cd_chdir）。
 
-**`2>>/abs/err.log` 稳定性说明**：该形态现状碰巧放行（`.log` 后缀使 `looksLikePath` 为 true，不触发条件 9），但依赖扩展名碰巧命中而非语义判据——`2>>/tmp/x`（无扩展名）又弹。本 change 使此类 token 统一按重定向形态跳过，写目标由扫描提取为绝对 ref（不构成障碍），行为稳定。
+**`2>>/abs/err.log` 稳定性说明**：该形态现状碰巧放行（`.log` 后缀使 `looksLikePath` 为 true，不触发条件 9），但依赖扩展名碰巧命中而非语义判据——`2>>/tmp/x`（无扩展名）又弹。前序 change 使此类 token 统一按重定向形态跳过，写目标由扫描提取为绝对 ref（不构成障碍），行为稳定。
 
 若 bash 命令为复合命令（以 `;`、`&&`、`||`、`&` 或换行分隔），且任一复合命令片段的第一个 token（basename，去掉路径前缀）为 `cd`，系统 MUST 判定整条命令为不可靠，reason 为 `cd_chdir`——**除非满足「cd 跟踪豁免」或「全绝对下游豁免」（见下方两条豁免）**。
 
@@ -1940,50 +1940,17 @@ type ExtractResult =
 7. **无不可提取的非绝对路径引用**——cd 片段之后的任何下游片段 MUST NOT 含不可提取的非绝对路径引用（见条件 9 的判定范围：位置参数 + 重定向目标 + curl/wget 输出写目标）。**任一非绝对且 `looksLikePath` 判定为 false 的引用**（如 `sub/`、`sub`、`src`——`looksLikePath` 对不含 `/` 前缀/`.`/`..`/扩展名的裸词返回 false，实测 `rm -rf sub/`、`cat sub`、`echo x > sub` 均提取 0 target）使 D2a 豁免不适用。理由：此类引用的真实落点依赖漂移后 cwd（`cd /tmp/x && rm -rf sub/` 真实删 `/tmp/x/sub`、`cd /etc && echo x > sub` 真实写 `/etc/sub`、`cd /etc && curl -o sub url` 真实写 `/etc/sub`），但 `looksLikePath` 不把它提取为 target（实测提取 0 target）——若在 cd 跟踪下放行会**静默放行外区写/删**（0 target → decision 层不弹窗），这是 cd 跟踪豁免的**安全洞**，必须显式排除。本条件覆盖写/删命令位置参数（原条件 7 只查此类）、read-only 命令位置参数（`cat sub`）、重定向目标（`echo x > sub`）、与 curl/wget 输出写目标（`curl -o sub`/`wget -O sub`/`curl -O` 无参，F1 修复）四类
 8. **无 `$PWD` / `$OLDPWD`**——cd 片段之后的任何下游片段 MUST NOT 含 `$PWD` / `$OLDPWD`。理由：`$PWD` 是 SAFE_VAR（`expandSafeVariables` 用真实进程 env["PWD"] 展开），不随模拟 cwd 漂移——`cd /tmp/x && cat $PWD/foo` 的真实落点是 `/tmp/x/foo`，但 `$PWD` 展开为真实 cwd（如 projectRoot），解析器按 env["PWD"] 解析错位；且 D2a 的「相对路径按模拟 cwd 解析」假设被 `$PWD` 破坏。故排除，维持 `cd_chdir`
 9. **无未加引号 glob / cwd 锚点 / 网络套接字 / 数字 fd 的不可提取裸词**——条件 4-8 的判定范围覆盖下游片段的全部路径引用（位置参数 + 重定向目标），**不做 `looksLikePath` 过滤**：不可提取裸词（`sub`、`sub/`）也纳入判定，因其在 cd 链下真实落点依赖 cwd 但无法提取为 target，豁免会静默放行。条件 4-8 任一命中即排除豁免
-10. **无 extractor 命令无非绝对位置参数**——cd 片段之后的任何下游片段，若其首命令**不在 `COMMAND_TABLE`（无 extractor）**，则该命令的所有位置参数 MUST 要么是显式绝对路径，要么不属于文件路径引用（文本参数命令）。任一非绝对位置参数（如 `cd /tmp/x && sort data.txt` 的 `data.txt`）使 D2a 豁免不适用。理由：无 extractor 命令（`sort`/`tar`/`cmp`/`diff`/`uniq`/`sha256sum`/`gzip`/`xz`/`git_log` 等）无法消费 `resolveBase` 提取真实落点——其位置参数永远不被加入 targets（entry.ts 的 COMMAND_TABLE miss → D6 unknown command → 0 target），若 D2a 豁免成立会 `reliable:true + 0 target` 静默放行（`cd /tmp/x && sort data.txt` 真实读 `/tmp/x/data.txt` 但提取 0 target）。条件 9 只排除**不可提取**裸词（`looksLikePath=false`），不覆盖**可提取**相对路径（`data.txt`，`looksLikePath=true`）——这是条件 10 独立存在的理由。绝对路径位置参数（如 `cd /etc && sort /tmp/data.txt`）不依赖 cwd，不受影响（走 D2b 豁免）。本条件覆盖范围与条件 7 的 write/delete 命令集合互补：条件 7 只查 write/delete 命令，条件 10 查所有无 extractor 的文件参数命令（含 read-only 的 `sort`/`cmp`/`uniq`/`sha256sum`、压缩的 `gzip`/`xz`、归档的 `tar`、比较的 `diff`）。**F2 补漏（已知清单，三波，非形式化穷尽）**：`FILE_ARG_COMMANDS` 涵盖已知「无 extractor + 位置参数是文件引用」的命令类——校验和类（`md5sum`/`sha1sum`/`sha224sum`/`sha384sum`/`sha512sum`/`b2sum`/`cksum`/`sum`）、文本行处理类（`tac`/`nl`/`od`/`comm`/`join`/`paste`/`cut`/`sdiff`）、解压转换类（`gunzip`/`unxz`/`bzip2`/`bunzip2`/`zcat`）、元数据类（`chgrp`）。否则该类命令（如 `cd /etc && md5sum sub`）仍 `reliable:true + 0 target` 静默放行读敏感目录，与 F2 critical 同类别同后果。**第二波穷尽**（f2b-recheck 复核中断前提出的残留类 + 全量扫描证实）：目录列举类（`dir`/`vdir`，ls 变体）、文本/编码处理类（`shuf`/`base64`/`basenc`/`expand`/`unexpand`/`fmt`/`fold`/`ptx`/`tsort`）、路径元数据类（`pathchk`/`realpath`/`readlink`/`pinky`，其中 `pinky -f` 读文件）、创建/删除类（`mktemp`/`link`/`unlink`/`mknod`/`mkfifo`——写工作树，`unlink sub` 静默删除、`mkfifo sub` 静默创建特殊文件为最高危写形态）。**第三波**（final-closeout-review 判 APPROVED_WITH_CHANGES issue 1，实测 19 命令仍静默放行）：原地覆写/分割类（`shred`/`split`/`csplit`——`shred sub` 原地覆写、`split sub` 向 cwd 写分片为最高危写形态）、压缩/归档类（`bzcat`/`xzcat`/`lzma`/`lz4`/`zstd`/`bzip3`/`unzip`/`zip`）、校验和/比较类（`shasum`/`sha3sum`/`diff3`）、转换/格式化/补丁类（`dos2unix`/`rev`/`column`/`pr`/`patch`，含 stdin 重定向形态 `patch -p0 < p.txt`）。**清单完备性声明**：本清单是「已知文件参数命令」的持续清点而非穷尽证明——清单外同类命令的残留为已知边界（tasks.md 记录，含 `env`/`nice`/`nohup` 等命令执行器类与条件 11 的尾挂 `cd /tmp` 旁路、D2b 路径 git 写子命令旁路），本条件以**排除判据**为准（无 extractor 且位置参数是 cwd 文件引用的命令都应被收集排除），后续新增同类命令按此判据补入清单。**排除判据**：位置参数不是 cwd 文件引用的命令不纳入——`id`/`uname`/`tty`/`logname`/`groups`/`seq`/`factor`/`numfmt`（位置参数是用户名/数字）、`basename`/`dirname`（字符串操作，无文件访问），实测确认保持豁免；`env`/`nice`/`nohup`/`timeout`/`setsid`/`watch`/`stdbuf` 等命令执行器（位置参数是 PATH 解析的命令名，仅 `./` 前缀形态 cwd 依赖）属另一类，需 wrapper 感知设计，见 tasks.md 已知边界记录（待后续 change）
+10. **无 extractor 命令无非绝对位置参数**——cd 片段之后的任何下游片段，若其首命令**不在 `COMMAND_TABLE`（无 extractor）**，则该命令的所有位置参数 MUST 要么是显式绝对路径，要么不属于文件路径引用（文本参数命令）。任一非绝对位置参数（如 `cd /tmp/x && sort data.txt` 的 `data.txt`）使 D2a 豁免不适用。理由：无 extractor 命令（`sort`/`tar`/`cmp`/`diff`/`uniq`/`sha256sum`/`gzip`/`xz`/`git_log` 等）无法消费 `resolveBase` 提取真实落点——其位置参数永远不被加入 targets（entry.ts 的 COMMAND_TABLE miss → D6 unknown command → 0 target），若 D2a 豁免成立会 `reliable:true + 0 target` 静默放行（`cd /tmp/x && sort data.txt` 真实读 `/tmp/x/data.txt` 但提取 0 target）。条件 9 只排除**不可提取**裸词（`looksLikePath=false`），不覆盖**可提取**相对路径（`data.txt`，`looksLikePath=true`）——这是条件 10 独立存在的理由。绝对路径位置参数（如 `cd /etc && sort /tmp/data.txt`）不依赖 cwd，不受影响（走 D2b 豁免）。本条件覆盖范围与条件 7 的 write/delete 命令集合互补：条件 7 只查 write/delete 命令，条件 10 查所有无 extractor 的文件参数命令（含 read-only 的 `sort`/`cmp`/`uniq`/`sha256sum`、压缩的 `gzip`/`xz`、归档的 `tar`、比较的 `diff`）。**F2 补漏（已知清单，三波，非形式化穷尽）**：`FILE_ARG_COMMANDS` 涵盖已知「无 extractor + 位置参数是文件引用」的命令类——校验和类（`md5sum`/`sha1sum`/`sha224sum`/`sha384sum`/`sha512sum`/`b2sum`/`cksum`/`sum`）、文本行处理类（`tac`/`nl`/`od`/`comm`/`join`/`paste`/`cut`/`sdiff`）、解压转换类（`gunzip`/`unxz`/`bzip2`/`bunzip2`/`zcat`）、元数据类（`chgrp`）。否则该类命令（如 `cd /etc && md5sum sub`）仍 `reliable:true + 0 target` 静默放行读敏感目录，与 F2 critical 同类别同后果。**第二波穷尽**（f2b-recheck 复核中断前提出的残留类 + 全量扫描证实）：目录列举类（`dir`/`vdir`，ls 变体）、文本/编码处理类（`shuf`/`base64`/`basenc`/`expand`/`unexpand`/`fmt`/`fold`/`ptx`/`tsort`）、路径元数据类（`pathchk`/`realpath`/`readlink`/`pinky`，其中 `pinky -f` 读文件）、创建/删除类（`mktemp`/`link`/`unlink`/`mknod`/`mkfifo`——写工作树，`unlink sub` 静默删除、`mkfifo sub` 静默创建特殊文件为最高危写形态）。**第三波**（final-closeout-review 判 APPROVED_WITH_CHANGES issue 1，实测 19 命令仍静默放行）：原地覆写/分割类（`shred`/`split`/`csplit`——`shred sub` 原地覆写、`split sub` 向 cwd 写分片为最高危写形态）、压缩/归档类（`bzcat`/`xzcat`/`lzma`/`lz4`/`zstd`/`bzip3`/`unzip`/`zip`）、校验和/比较类（`shasum`/`sha3sum`/`diff3`）、转换/格式化/补丁类（`dos2unix`/`rev`/`column`/`pr`/`patch`，含 stdin 重定向形态 `patch -p0 < p.txt`）。**清单完备性声明**：本清单是「已知文件参数命令」的持续清点而非穷尽证明——清单外同类命令的残留为已知边界（tasks.md 记录，含 `env`/`nice`/`nohup` 等命令执行器类与条件 1... (line truncated)
 11. **无 git 写子命令且 cd 落点非默认 tmp 目录**——若 cd 链的**最终 cd 落点**（最后一个 cd 片段的目标）不在默认 tmp 目录（`/tmp`、`/private/tmp`、`/var/tmp`，判定复用 `isDefaultTmpPath`），则 cd 片段之后的任何下游片段 MUST NOT 是 git **写**子命令（`rm`/`add`/`commit`/`checkout`/`clean`/`mv`/`reset`/`revert`/`stash` 等，即不在 `GIT_READONLY_SUBCOMMANDS` 集合的 git 子命令）。git 写子命令修改工作树文件（删除/覆盖），其路径参数是 git 内部管理的 pathspec——本解析器不把 git 路径参数提取为 target（git 不在 COMMAND_TABLE），若豁免成立会 `reliable:true + 0 target` 静默放行（`cd /etc && git rm file.txt` 真实删除 `/etc/file.txt` 但提取 0 target）。**用户（总体设计部）拍板**：git **只读**子命令（`log`/`show`/`diff`/`status`/`branch`/`tag`/`remote`/`config`/`rev-parse`/`rev-list`/`shortlog`/`blame`/`ls-files`，pathspec 是 git 内部管理的查询条件，非 shell cwd 文件引用）在 cd 链下**静默放行正确**——本条件不排除它们；git **写**子命令在 cd 落点非默认 tmp 目录时保守排除（回退 `cd_chdir`），cd 落点在默认 tmp 目录时**静默放行**（tmp 无持久安全价值，与 `decision.ts` step 2c 的 `tmp_default_allowed` 语义一致）。git 子命令分类单一事实源：`GIT_READONLY_SUBCOMMANDS`（git-cmds.ts，与 `SILENT_COMMANDS.git` 一致）
 
-**全绝对下游豁免（本 change 新增）**：当复合命令中**所有** `cd` 片段之后的**下游命令片段**（按 `;`/`&&`/`||`/`&`/换行拆分，位于任一 `cd` 片段之后）满足以下**全部**条件时，MUST NOT 判 `cd_chdir`：
+**read-only 裸词目录在 cd 跟踪豁免下解析为 target（本 change 新增）**：cd 跟踪豁免（D2a）适用时，下游片段中 **read-only 文件参数命令**（`find`/`grep`/`ls`/`cat`/`head`/`tail`/`wc` 等，`canExtractBareDir` 谓词为 true——命令在 `COMMAND_TABLE` 有 extractor 且非 `WRITE_DELETE` 集合）的**裸词目录位置参数**（`looksLikePath` 判定为 false 的无扩展名相对目录，如 `src`、`dist/`、`node_modules/@earendil-works`）MUST 经 `resolveBase` 解析为绝对 read target（`/cd目标/src`），MUST NOT 因「条件 9 不可提取裸词排除」误判 `cd_chdir`——这类裸词的真实落点（漂移后 cwd 下的目录）是**可静态确定**的（D2a 下 cwd 已模拟），且 extractor 能把它提取为 target，决策层仍按 `/cd目标/src` 判定读权限，不构成静默放行。
 
-1. **至少一个下游片段含显式绝对路径引用**——豁免不能因"无路径引用"而空转生效（`ls` 单独、`npm test` 单独这类隐式依赖 cwd 的片段不构成豁免证据，维持保守）
-2. **所有下游片段的全部路径引用都是绝对路径**——路径引用包括：
-   - `looksLikePath` 判定的**位置参数**（以 `/`、`~`、`C:\` 开头，或 `./`/`../` 前缀、带扩展名相对词）
-   - **重定向目标**（`>`/`>>`/`2>`/`2>>`/`<` 等操作符后的目标路径）
-   任一路径引用不是显式绝对路径（以 `/` 开头或 Windows 盘符）时，豁免不适用
-   - **网络套接字 / 数字 fd 重定向目标**（`/dev/tcp/`、`/dev/udp/`、`/dev/fd/[0-9]+` 前缀）**即使以 `/` 开头也不构成豁免证据**——它们是网络外传 / 任意 fd 访问目标，不是「cd 造成的 cwd 漂移影响文件系统路径解析」的场景，豁免的语义（绝对路径解析不依赖 cwd）对其不适用；含此类目标的片段使豁免不适用，维持 `cd_chdir`
-3. **无路径引用的片段不构成豁免阻碍，但也不构成豁免证据**——它们（如 `ls`、`pwd`、`echo hi`）被豁免时仍需满足条件 1（另有片段提供绝对路径证据）；若全部下游片段都无路径引用，条件 1 不满足，豁免不适用
+**条件 7 的裸词排除收窄（本 change 修复）**：cd 跟踪豁免条件 7「无不可提取的非绝对路径引用」MUST 收窄为「无 **extractor 无法提取为 target** 的非绝对路径引用」——read-only 文件参数命令（`canExtractBareDir` 为 true）的裸词目录**不再排除**（改经 `resolveBase` 提取为 target），但 **write/delete 命令**（`rm`/`mkdir`/`mv`/`cp`/`touch`/`chmod` 等）的裸词位置参数**仍排除**（维持 `cd_chdir`，fail-closed——写裸词无法安全提取，`cd /tmp/x && rm -rf sub` 真实删 `/tmp/x/sub` 仍静默放行风险，必须保守）。`cat sub`（read-only 裸词）经 `resolveBase` 提取 `/cd目标/sub` 为 read target。
 
-**cwd 模拟解析（cd 跟踪豁免下）**：当 cd 跟踪豁免适用时，`extractBashTargets` 的逐片段提取（步骤 5）MUST 维护一个模拟 cwd——初始为 `projectRoot`，每遇到一个 cd 片段（目标为绝对路径）则更新模拟 cwd 为该目标，后续片段的相对路径解析基准 MUST 用模拟 cwd 而非固定 projectRoot。绝对路径引用始终按自身解析（不依赖 cwd）。
+**find 的 flag 值不收集（本 change 修复）**：`collectStagePathRefs` 对 `find` 的 **flag 值参数** MUST NOT 当路径引用收集——`find` 的 `-type`/`-name`/`-maxdepth`/`-mindepth`/`-path`/`-size`/`-mtime`/`-newer`/`-newermt`/`-user`/`-group` 等 flag 的**下一个 token 值**（如 `-type f` 的 `f`、`-maxdepth 2` 的 `2`、`-name '*.ts'` 的 `*.ts`）不是文件路径引用，收集它们会误判为「不可提取裸词」（`looksLikePath("f")`=false）而排除豁免，导致 `cd /abs && find src -type f`（绝对起点、无裸词目录）仍误弹 `cd_chdir`。这些 flag 值 MUST 被跳过（`FIND_FLAG_VALUE_ARGS` 共享常量，决策侧 `collectStagePathRefs` 与提取侧 `readExtract` 复用同一集合——不进 `refs`，也不被 `readExtract` 当 read target push）。
+**刻意排除（勿按上文文本实现）**：`-newer`/`-newerat`/`-newerct`/`-samefile`/`-fprint`/`-fprintf` 的**第一个值**是文件引用（真实落点依赖 cwd），必须保持收集供条件 9 排除（fail-closed）——若按上文文本跳过它们，决策侧 refs 空 → d2a 保持 true → 0 target 静默放行读外区。实现（`extractors.ts` `FIND_NONPATH_FLAG_ARGS`）刻意不含这六个 flag，与决策/提取两侧复用同步。回写注记原因：收尾 review nit 文档漂移，实现是更安全的偏差。
 
-**豁免的边界**：
-- **cd 跟踪豁免优先于全绝对下游豁免**——cd 跟踪豁免是治本（真实算落点），全绝对下游豁免是兜底（只对绝对路径适用）；两者对同一命令不冲突（cd 跟踪豁免处理相对路径下游，全绝对下游豁免处理显式全绝对下游）
-- **cd 跟踪豁免仅覆盖 cd 片段之后的片段**——cd 片段之前的片段（若有，如 `echo hi && cd /tmp/x && ...`）不受 cd 影响，按 projectRoot 解析；cd 片段自身是 cwd 变更者，不参与路径解析
-- **cd 跟踪豁免下的 cwd 模拟是顺序的**——`cd /tmp/a && cd /tmp/b && cat x` 中，`cat x` 按 `/tmp/b` 解析（最后一个成功 cd 的目标）；`cd /tmp/a && cat x` 中，`cat x` 按 `/tmp/a` 解析
-- **cd 跟踪豁免下的 cd 目标必须是绝对路径**——任一 cd 目标不是绝对路径（相对、`~`、`$VAR`、glob）时，cd 跟踪豁免不适用，整条命令维持 `cd_chdir`（保守：相对 cd 目标不可静态确定）
-- 豁免判定在 `scanCdChdir` 内完成，不影响其他守卫（`glob_expansion`、`shell_forwarder` 等仍按各自规则判定）
-
-**理由**：`cd` 是 bash 内建，会改变后续所有相对路径命令的 cwd 基准。当前实现把相对路径的解析基准固定为 `<projectRoot>`，完全忽略 `cd` 的实际效果，导致 `cd /etc && rm -rf .` 中的 `.` 被解析为 `<projectRoot>/.` 而非 `/etc/`，实际执行会删除 `/etc` 内容。把整条含 `cd` 片段的复合命令判为不可靠是"静态分析无法预测相对路径实际落点"的最小侵入修复。
-
-**cd 跟踪豁免的理由**：`&&` 链 + 绝对 cd 目标下，cwd 落点是**可静态确定的**——`&&` 短路保证下游只在 cd 成功时执行（cd 成功 ⇒ cwd = cd 目标），绝对 cd 目标不受 `CDPATH`/`$HOME`/`cd -`/相对链干扰（均已实验验证）。此时「相对路径落点不确定」的根本问题不再存在，解析器可真实算出 cd 后的相对路径落点（如 `cd /tmp/x && echo hi > rel.txt` → 解析出 `/tmp/x/rel.txt` 而非 `<projectRoot>/rel.txt`），无需判不可靠。相对 cd 目标、`;`/`||` 分隔符下 cwd 仍不可静态确定，维持 `cd_chdir` 保守拦截。
-
-**全绝对下游豁免的理由**：当 `cd` 之后的下游片段**显式引用**路径且**全部为绝对路径**时，`cd` 造成的 cwd 漂移**不影响**任何路径解析——绝对路径解析不依赖 cwd。此时 `cd_chdir` 的误判风险不存在（解析器不会把绝对路径解析到错误位置），判不可靠只会产生噪音弹窗。真实案例：`cd /tmp/pi-ui-ext-inspect/package && grep -n "..." extensions/index.ts | head -60` 中 cd 后跟的是相对路径 `extensions/index.ts`——该命令是纯 `&&` 链、cd 目标绝对，**cd 跟踪豁免适用**，解析出 `/tmp/pi-ui-ext-inspect/package/extensions/index.ts`（治本）；而 `cd /tmp/x && grep -n "..." /tmp/x/file | head` 下游全绝对，全绝对下游豁免适用。**豁免要求"至少一个显式绝对路径引用"**，防止 `cd /tmp/x && ls`（隐式读 cwd、无显式路径引用）被空转豁免——这类片段虽无目标解析错位（`ls` 无参数提取 0 target），但既有安全断言（`cd /etc && ls` → cd_chdir）把其视为应保守拦截的场景，且豁免它们不解决任何真实噪音。豁免仅覆盖"下游显式全绝对"的窄场景，不改变相对路径下游、无显式路径引用下游仍判不可靠的保守行为。
-
-**反例（仍触发 cd_chdir）**：
-- 下游含相对路径参数且命令不满足 cd 跟踪豁免（如 `cd /tmp/x; grep pattern file.txt`——`;` 分隔，cd 跟踪豁免不适用）
-- 下游含相对重定向目标且命令不满足 cd 跟踪豁免（如 `cd /tmp/x; echo hi > rel.txt`）——`;` 分隔下 cwd 不可静态确定，豁免不适用
-- 下游含 glob 前缀为相对路径或空 prefix（如 `cd /tmp/x; ls *.md`）——`;` 分隔，豁免不适用
-- 下游含 `$VAR` 变量路径（如 `cd /tmp/x; cat $FILE`）
-- 下游全部片段无显式路径引用（如 `cd /tmp/x; ls`、`cd /tmp/x; git status`）——全绝对下游豁免条件 1 不满足，cd 跟踪豁免因非纯 `&&` 链不适用
-- **cd 目标为相对路径**（如 `cd sub && cat file.txt`、`cd ../foo && rm -rf .`）——cd 跟踪豁免条件 2 不满足（相对 cd 目标受 `CDPATH` 影响，不可静态确定）
-- **cd 目标含 `~`**（如 `cd ~ && cat file.txt`）——依赖 `$HOME`，不可静态确定
-- **cd 目标含 `$VAR`**（如 `cd $HOME && cat file.txt`）——不可静态确定
-- **cd 目标含未加引号 glob**（如 `cd /tmp/*/ && cat file.txt`）——glob 展开目标集合不可静态枚举
-- **`cd -`**（如 `cd /tmp/a && cd - && cat file.txt`）——栈语义依赖 cwd 历史，不可静态确定
-- **含 `||` / `;` / `&` / 换行分隔**（如 `cd /tmp/x || cat file.txt`、`cd /tmp/x & cat file.txt`）——非纯 `&&` 链，cd 跟踪豁免不适用
-- **下游含不可提取的非绝对路径引用**（如 `cd /etc && echo x > sub`、`cd /etc && cat sub`、`cd /tmp/x && rm -rf sub/`、`cd /tmp/x && mkdir sub`、`cd /etc && curl -o sub url`、`cd /etc && wget -O sub url`、`cd /etc && curl -O url`）——引用是 `looksLikePath` 判定为 false 的裸词（无扩展名/无 `/` 前缀/无 `.`/`..`），真实落点依赖漂移后 cwd（`/etc/sub` 等），但提取 0 target；若豁免放行会**静默放行写/删/读外区**，cd 跟踪豁免条件 7 不满足（本 change 修复前的安全洞，条件 7 原只查 write/delete 位置参数，已扩展覆盖 read-only 位置参数、重定向目标与 curl/wget 输出写目标——curl/wget 的 URL 位置参数是网络路径非文件引用，其输出写目标 flag 值由 `collectStagePathRefs` 定向收集供条件 9 排除，F1 修复）
-- **下游命令无 extractor 且含非绝对位置参数**（如 `cd /tmp/x && sort data.txt`、`cd /etc && sort sub`、`cd /etc && tar xf sub`、`cd /etc && cmp sub`、`cd /etc && diff a b`、`cd /etc && gzip sub`、`cd /etc && xz sub`）——命令不在 `COMMAND_TABLE`（无 extractor），其位置参数无法被 `resolveBase` 提取为 target；`data.txt`（`looksLikePath=true` 可提取相对路径，条件 9 不触发）与 `sub`（不可提取裸词，条件 9 触发但需命令被 `FILE_ARG_COMMANDS` 收集）均使 cd 跟踪豁免不适用——若豁免放行会 `reliable:true + 0 target` **静默放行读/解压/压缩外区**，cd 跟踪豁免条件 10 不满足（本 change 修复前，`sort`/`tar`/`cmp` 等不在 `FILE_ARG_COMMANDS`，其裸词位置参数不被 `collectStagePathRefs` 收集，条件 9 看不到 → 豁免成立 + 0 target 静默放行；F2 修复补齐）。`sort /tmp/data.txt`（绝对位置参数）不受影响，仍走全绝对下游豁免（D2b）
-- **下游为 git 写子命令且 cd 落点非默认 tmp 目录**（如 `cd /etc && git rm file.txt`、`cd /etc && git checkout file.txt`、`cd /etc && git add file.txt`、`cd /etc && git mv a.txt b.txt`）——git 写子命令（不在 `GIT_READONLY_SUBCOMMANDS`）修改工作树文件，其路径参数是 git 内部管理的 pathspec，本解析器不提取为 target；cd 落点 `/etc` 非默认 tmp（`isDefaultTmpPath` 判 false），若豁免放行会 `reliable:true + 0 target` **静默放行删除/覆盖工作树文件**（`cd /etc && git rm file.txt` 真实删除 `/etc/file.txt`），cd 跟踪豁免条件 11 不满足（用户拍板：非 tmp 落点保守排除）。**例外（静默放行）**：cd 落点在默认 tmp 目录（`cd /tmp/x && git rm file.txt`、`cd /var/tmp/x && git rm file.txt`）时条件 11 不触发（tmp 无持久安全价值），仍静默放行；git 只读子命令（`cd /etc && git log file.txt`、`cd /etc && git status`）不在此反例（用户拍板：只读子命令静默放行正确，pathspec 非 cwd 文件引用）
-- **下游为 coreutils 文件命令类（校验和/文本行处理/解压转换/元数据）裸词位置参数**（如 `cd /etc && md5sum sub`、`cd /etc && sha512sum sub`、`cd /etc && b2sum sub`、`cd /etc && cksum sub`、`cd /etc && comm a b`、`cd /etc && join a b`、`cd /etc && paste sub`、`cd /etc && nl sub`、`cd /etc && cut -d: -f1 sub`、`cd /etc && tac sub`、`cd /etc && sdiff a b`、`cd /etc && gunzip sub`、`cd /etc && zcat sub`、`cd /etc && chgrp grp sub`）——这些命令无 extractor（不在 `COMMAND_TABLE`）且位置参数是文件引用（校验和/文本行处理/解压转换/元数据类），不在 `FILE_ARG_COMMANDS` 时其裸词不被 `collectStagePathRefs` 收集，条件 9 看不到 → 豁免成立 + 0 target 静默放行（`cd /etc && md5sum sub` 静默读 /etc/sub，与 F2 critical 同类别同后果）。F2 补漏后加入 `FILE_ARG_COMMANDS`，其裸词位置参数被收集，条件 10 排除豁免（维持 cd_chdir）。`md5sum /tmp/a.txt`（绝对位置参数）不受影响，仍走 D2b 豁免。**第二波穷尽**：`cd /etc && dir sub`、`cd /etc && shuf sub`、`cd /etc && base64 sub`、`cd /etc && realpath sub`、`cd /etc && mktemp subXXXXXX`、`cd /etc && unlink sub`、`cd /etc && mkfifo sub` 等目录列举/文本编码/路径元数据/创建删除类同判（`unlink sub` 静默删除 `/etc/sub`、`mkfifo sub` 静默创建特殊文件为最高危写形态）；`id sub`（用户名）、`basename sub`（字符串操作）、`seq 100`（数字）位置参数非 cwd 文件引用，不在此反例（实测保持豁免）。**第三波**：`cd /etc && shred sub`（原地覆写——最高危写形态）、`cd /etc && split sub`（向 cwd 写分片 xaa/xab…）、`cd /etc && csplit sub 1`、`cd /etc && unzip sub.zip`、`cd /etc && zip a.zip sub`、`cd /etc && zstd sub`、`cd /etc && bzcat sub`、`cd /etc && shasum sub`、`cd /etc && diff3 a b c`、`cd /etc && dos2unix sub`、`cd /etc && patch -p0 < p.txt`（stdin 重定向形态）等同判
+**设计内形态（维持 `cd_chdir`，非本 change 范围）**：cwd-anchor `.`（条件 4，`find .`——`.` 锚定运行时 cwd，cd 后无法静态确定目标集）；`;`/`||`/`&`/换行链（条件 1，非纯 `&&`——`;` 下 cd 失败时下游仍执行，cwd 不可静态确定）；glob（条件 5）；`$PWD`/`$OLDPWD`（条件 8）。这些维持 `cd_chdir` 保守弹窗，是 fail-closed 安全边界，不属本 change。
 
 #### Scenario: cd 后接写入命令判不可靠
 
@@ -2373,7 +2340,7 @@ type ExtractResult =
 #### Scenario: cd 后相对路径引用伴重定向 token 仍判不可靠（本 change 新增）
 
 - **WHEN** bash 命令为 `cd /tmp/x && ls sub 2>/dev/null`
-- **THEN** 判 `cd_chdir`（`sub` 是真实相对位置参数，非重定向 token，仍收集；`looksLikePath("sub")` 为 false → D2a 条件 9 / D2b 排除，豁免不成立）
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /tmp/x/sub] }`——`sub` 是 read-only 裸词目录（非重定向 token），D2a 下经 `resolveBase` 解析为 read target（条件 7 收窄后不排除）；`2>/dev/null` 是 fd 复制（重定向扫描明确跳过，无文件目标）。**本 change 修复前**：`sub` 被当不可提取裸词排除 → 误判 `cd_chdir`；修复后解析为真实读目标 `/tmp/x/sub`（决策层仍按 `/tmp/x/sub` 判定读权限）。**用户（总体设计部）拍板**：裸词目录 + 无害 fd 复制组合豁免正确，既有场景的 `cd_chdir` 断言已过时，回写为豁免。
 
 #### Scenario: cd 后相对重定向写目标伴重定向 token 仍判不可靠（本 change 新增）
 
@@ -2404,6 +2371,41 @@ type ExtractResult =
 
 - **WHEN** bash 命令为 `cd /etc && cat <<EOF`
 - **THEN** 判不可靠（`<<EOF` 是 heredoc 重定向 token，不命中判据保持收集；无任何绝对路径引用 → D2b 条件 1 `anyAbsRef` 为 false → 豁免不适用。实测：实际 reason 为 `heredoc`——由 scanUnreliable 在 cd 守卫之前拦截，与 `cd_chdir` 同为「判不可靠」拦截，安全语义一致；属守卫链顺序实现细节，两 reason 均可接受）
+
+#### Scenario: cd 后 read-only 裸词目录 find 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /Users/eliot/my/permission-guard-pi && find src -type f | head -50`，projectRoot 为 `/Users/eliot/my/permission-guard-pi`
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/src] }`——纯 `&&` 链 + 绝对 cd 目标；read-only 命令 `find` 的裸词目录 `src` 经 `resolveBase` 解析为绝对 read target（条件 7 收窄后不排除，extractor 提取 `/cd目标/src`），不触发 `cd_chdir`
+
+#### Scenario: cd 后 read-only 裸词目录 grep 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /Users/eliot/my/permission-guard-pi && grep -rn "pattern" dist/ | head`，projectRoot 为 `/Users/eliot/my/permission-guard-pi`
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/dist] }`——`grep` 的裸词目录 `dist/` 经 `resolveBase` 解析为绝对 read target，条件 7 收窄后不排除
+
+#### Scenario: cd 后 find 绝对起点含 flag 值自动放行（本 change 新增，根因 B 反例）
+
+- **WHEN** bash 命令为 `cd /tmp/x && find /tmp/x/src -type f -maxdepth 2`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /tmp/x/src] }`——`find` 的 flag 值 `-type f` 的 `f`、`-maxdepth 2` 的 `2` 被跳过（不收集为路径引用，`FIND_FLAG_VALUE_ARGS` 共享常量），起点 `/tmp/x/src` 是绝对路径，条件 7 不触发，豁免成立。**修复前**：`f`/`2` 被当不可提取裸词收集，条件 9 误判排除豁免 → 误弹 `cd_chdir`
+
+#### Scenario: cd 后 read-only 裸词目录 ls 自动放行（本 change 新增）
+
+- **WHEN** bash 命令为 `cd /Users/eliot/my/permission-guard-pi && ls node_modules/@earendil-works 2>/dev/null`，projectRoot 为 `/Users/eliot/my/permission-guard-pi`
+- **THEN** 提取结果为 `{ reliable: true, targets: [read /Users/eliot/my/permission-guard-pi/node_modules/@earendil-works] }`——嵌套裸词目录 `node_modules/@earendil-works` 经 `resolveBase` 解析为绝对 read target，条件 7 收窄后不排除
+
+#### Scenario: cd 后 write 裸词 rm 仍判不可靠（本 change 反例，fail-closed）
+
+- **WHEN** bash 命令为 `cd /tmp/x && rm -rf sub`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——write 命令 `rm` 的裸词 `sub` 是条件 7 收窄后仍排除的形态（写裸词无法安全提取，`cd /tmp/x && rm -rf sub` 真实删 `/tmp/x/sub`，若放行静默删），维持 `cd_chdir`
+
+#### Scenario: cd 后 cwd 锚点 find 仍判不可靠（本 change 反例，设计内）
+
+- **WHEN** bash 命令为 `cd /etc && find . -type f`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——`find .` 的起点 `.` 是 cwd 锚点（条件 4 不满足），维持 `cd_chdir`（设计内，非本 change 范围）
+
+#### Scenario: cd 后无 extractor 命令裸词仍判不可靠（本 change 反例，设计内）
+
+- **WHEN** bash 命令为 `cd /etc && sort sub`，projectRoot 为 `/proj`
+- **THEN** 提取结果为 `{ reliable: false, reason: "cd_chdir" }`——`sort` 无 extractor（不在 COMMAND_TABLE），裸词 `sub` 无法消费 `resolveBase` 提取为 target，条件 10 不满足，维持 `cd_chdir`
 
 ### Requirement: sed 只读豁免
 

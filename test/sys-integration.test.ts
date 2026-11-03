@@ -1143,7 +1143,11 @@ test("SYS-KP: 关键点等价变体跨分系统整合 auto-allow + audit 一致"
       };
 
       // Session 1: grant the base command persistent (user allows always).
-      const base = `cd ${projectRoot} && find openspec -type f | head -50`;
+      // 载体用 `find . -type f`（cwd-anchor `.`，设计内仍判 cd_chdir → 首次
+      // 弹窗建立 grant）。不用裸词目录（如 `find openspec`）：本 change 让
+      // read-only 裸词目录在 D2a 下豁免不再弹窗，`find openspec` 已不是弹窗
+      // 载体（用户拍板更新 SYS-KP 载体）。
+      const base = `cd ${projectRoot} && find . -type f | head -50`;
       const s1 = createMockPi({
         projectRoot,
         uiChoice: async () => UI.alwaysAllowCmd,
@@ -1159,7 +1163,7 @@ test("SYS-KP: 关键点等价变体跨分系统整合 auto-allow + audit 一致"
 
       // Session 2: keypoint-equivalent variant (head -50 → -60) must
       // auto-allow from the persistent grant (no prompt).
-      const variant = `cd ${projectRoot} && find openspec -type f | head -60`;
+      const variant = `cd ${projectRoot} && find . -type f | head -60`;
       let promptCount = 0;
       const s2 = createMockPi({
         projectRoot,

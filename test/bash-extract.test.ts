@@ -3634,31 +3634,46 @@ test("BMG-CD-unextractable-redirect-slash-reject: cd_echo_gt_sub_slash_reject", 
 });
 
 test("BMG-CD-unextractable-read-cat-reject: cd_cat_sub_reject", () => {
-  // 洞 3：cd 后 read-only `cat sub`（裸词，looksLikePath=false）。
+  // 本 change 预期行为变化：read-only 裸词目录（`cat sub` 的 `sub`）在 D2a
+  // 下经 resolveBase 解析为 read target（/etc/sub），不再判 cd_chdir——
+  // 决策层仍按 /etc/sub 判定读权限，不构成静默放行。
   const r = extractBashTargets("cd /etc && cat sub", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/etc/sub"),
+    `expected read target /etc/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });
 
 test("BMG-CD-unextractable-read-ls-reject: cd_ls_sub_reject", () => {
-  // 洞 4：cd 后 read-only `ls -la sub`（裸词）。
+  // 本 change 预期行为变化：`ls -la sub` 的裸词目录 `sub` 解析为 /etc/sub。
   const r = extractBashTargets("cd /etc && ls -la sub", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/etc/sub"),
+    `expected read target /etc/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });
 
 test("BMG-CD-unextractable-read-grep-reject: cd_grep_sub_reject", () => {
-  // 洞 5：cd 后 read-only `grep pattern sub`（pattern 是模式词，sub 是裸词）。
+  // 本 change 预期行为变化：`grep pattern sub` 的 PATTERN（pattern）跳过，
+  // 裸词目录 `sub` 解析为 /tmp/x/sub。
   const r = extractBashTargets("cd /tmp/x && grep pattern sub", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/sub"),
+    `expected read target /tmp/x/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });
 
 test("BMG-CD-unextractable-read-wc-reject: cd_wc_sub_reject", () => {
-  // 洞 6：cd 后 read-only `wc sub`（裸词）。
+  // 本 change 预期行为变化：`wc sub` 的裸词目录 `sub` 解析为 /etc/sub。
   const r = extractBashTargets("cd /etc && wc sub", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/etc/sub"),
+    `expected read target /etc/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });
 
 // ============================================================
@@ -4398,10 +4413,15 @@ test("BMG-CD-redirect-token-abs-write-exempt: cd_redirect_token_abs_write_exempt
 });
 
 test("BMG-CD-redirect-token-rel-posarg-reject: cd_redirect_token_rel_posarg_reject", () => {
-  // 反例：`sub` 是真实相对位置参数（非重定向 token），仍保守 cd_chdir。
+  // 本 change 预期行为变化（用户拍板回写 spec）：`sub` 是 read-only 裸词目录
+  // （非重定向 token），D2a 下解析为 read target（/tmp/x/sub）；`2>/dev/null`
+  // 是无害 fd 复制（重定向扫描明确跳过）。裸词目录 + fd 复制组合豁免正确。
   const r = extractBashTargets("cd /tmp/x && ls sub 2>/dev/null", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/sub"),
+    `expected read target /tmp/x/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });
 
 test("BMG-CD-redirect-token-rel-redirect-reject: cd_redirect_token_rel_redirect_reject", () => {
@@ -4759,4 +4779,122 @@ test("BT-FSUB-13: for-body $(grep) with dotdot traversal is unreliable", () => {
   const r = extractBashTargets(`for f in a b c; do n=$(grep -c '^#' "$f" x/../../etc/passwd); echo "$n"; done`, PROJ);
   assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
   if (!r.reliable) assert.equal(r.reason, "command_substitution");
+});
+
+// ===== BT-CDBARE：cd 链下 read-only 裸词目录 / find flag 值（本 change） =====
+// 根因 A：`find src`/`grep ... dist/`/`ls node_modules/@earendil-works` 的裸词
+// 目录（looksLikePath=false）被 D2a 条件 9 当不可提取裸词排除 → 误报 cd_chdir。
+// 根因 B：`find /abs/src -type f -maxdepth 2` 的 flag 值（f/2）被 collectStagePathRefs
+// 当路径引用收集 → 同样误判。本 change 修复：read-only 裸词目录在 D2a 下解析为
+// read target（条件 7/9 收窄），find flag 值不收集（FIND_FLAG_VALUE_ARGS）。
+
+test("BT-CDBARE-1: cd + read-only bare dir find is reliable", () => {
+  // 根因 A 正例：`find src -type f | head` 的 `src` 是裸词目录，D2a 下应解析
+  // 为 read target，不误报 cd_chdir。
+  const r = extractBashTargets(
+    "cd /Users/eliot/my/permission-guard-pi && find src -type f | head -50",
+    "/Users/eliot/my/permission-guard-pi",
+  );
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/Users/eliot/my/permission-guard-pi/src"),
+    `expected read target .../src, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BT-CDBARE-2: cd + read-only bare dir grep is reliable", () => {
+  // 根因 A 正例：`grep -rn pattern dist/` 的 `dist/` 是裸词目录。
+  const r = extractBashTargets(
+    "cd /Users/eliot/my/permission-guard-pi && grep -rn pattern dist/ | head",
+    "/Users/eliot/my/permission-guard-pi",
+  );
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/Users/eliot/my/permission-guard-pi/dist"),
+    `expected read target .../dist, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BT-CDBARE-3: cd + find abs start with flag values is reliable", () => {
+  // 根因 B 正例：`find /tmp/x/src -type f -maxdepth 2` 的 flag 值（f/2）被
+  // 跳过收集，绝对起点 `/tmp/x/src` 是路径引用，D2a 豁免成立。
+  const r = extractBashTargets("cd /tmp/x && find /tmp/x/src -type f -maxdepth 2", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/tmp/x/src"),
+    `expected read target /tmp/x/src, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BT-CDBARE-4: cd + read-only nested bare dir ls is reliable", () => {
+  // 根因 A 正例：`ls node_modules/@earendil-works` 嵌套裸词目录。
+  const r = extractBashTargets(
+    "cd /Users/eliot/my/permission-guard-pi && ls node_modules/@earendil-works 2>/dev/null",
+    "/Users/eliot/my/permission-guard-pi",
+  );
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/Users/eliot/my/permission-guard-pi/node_modules/@earendil-works"),
+    `expected read target .../node_modules/@earendil-works, got ${JSON.stringify(r.targets)}`,
+  );
+});
+
+test("BT-CDBARE-5: cd + write bare dir rm stays cd_chdir (fail-closed)", () => {
+  // 反例：write 命令 `rm -rf sub` 的裸词仍排除（条件 7 收窄后仍保留）。
+  const r = extractBashTargets("cd /tmp/x && rm -rf sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-6: cd + cwd anchor find stays cd_chdir (design-internal)", () => {
+  // 反例：`find .` 的 `.` 是 cwd 锚点（条件 4 排除），维持 cd_chdir（设计内）。
+  const r = extractBashTargets("cd /etc && find . -type f", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-7: cd + no-extractor bare word stays cd_chdir (design-internal)", () => {
+  // 反例：`sort sub` 无 extractor 无法消费 resolveBase（条件 10 排除），维持 cd_chdir。
+  const r = extractBashTargets("cd /etc && sort sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-8: cd + semicolon chain with bare dir stays cd_chdir (design-internal)", () => {
+  // 反例：`;` 链（条件 1 不满足，非纯 &&），裸词目录不豁免，维持 cd_chdir。
+  const r = extractBashTargets("cd /tmp/x; ls src", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-9: cd + no-path find stays cd_chdir (cwd-anchor default)", () => {
+  // 收尾 review critical 固化：`find -type f`（无路径操作数）默认起点是 `.`
+  // （cwd 锚点），真实递归枚举 cd 目标整树。`FIND_NONPATH_FLAG_ARGS` 跳过
+  // flag 值后 refs 为空 → 若不放 cwd 锚点哨兵，条件 9 无 ref 可查 → d2a 保持
+  // true → `reliable:true + 0 target` 静默放行读外区（本 change 新开的洞）。
+  // 修复：find 无路径操作数视同含 cwd 锚点 `.`，与 `find .` 同判 cd_chdir。
+  const r = extractBashTargets("cd /etc && find -type f", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-10: cd + no-path find in pipeline stays cd_chdir", () => {
+  // 同 critical：`find -type f | head` 的 find 片段无路径操作数，视同 cwd 锚点。
+  const r = extractBashTargets("cd /etc && find -type f | head", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BT-CDBARE-11: cd + grep -e pattern bare dir is reliable", () => {
+  // 收尾 review warning 固化：`grep -e pattern sub` 的 `-e` 消费 pattern 后，
+  // `grepPatternSkipIdx` 的 `!sawNonOpt` 分支误把真实文件 `sub` 当第一个
+  // pattern 跳过（skip={2,3}）→ refs 空 → 0 target 静默放行读 `/etc/sub`。
+  // 修复：`-e`/`-f` 消费 pattern 后置 `sawNonOpt=true`，后续非 flag token 是
+  // 文件（不跳过）→ `sub` 收集并经 resolveBase 解析为 read target。
+  const r = extractBashTargets("cd /etc && grep -e pattern sub", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  assert.ok(
+    r.targets.some((t) => t.action === "read" && t.path === "/etc/sub"),
+    `expected read target /etc/sub, got ${JSON.stringify(r.targets)}`,
+  );
 });

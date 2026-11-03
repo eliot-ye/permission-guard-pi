@@ -3,7 +3,7 @@
 
 import { splitCommands, splitPipelines, tokenize, looksLikePath, isAmpBackgroundSeparator } from "./parse.ts";
 import { isReadOnlyWithArgs, isDevSocketOrFd } from "./readonly.ts";
-import { COMMAND_TABLE } from "./extractors.ts";
+import { COMMAND_TABLE, FIND_NONPATH_FLAG_ARGS, canExtractBareDir, grepPatternSkipIdx } from "./extractors.ts";
 import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
 import { isDefaultTmpPath } from "../path-utils.ts";
 
@@ -440,6 +440,32 @@ function containsCwdAnchor(token: string): boolean {
 }
 
 /**
+ * Check whether a token contains a redirect operator (`>`, `<`, `>>`, `&>`,
+ * `2>`, `foo>bar`, `&>log`, etc.). Such tokens are NOT bare directory words —
+ * their redirect-target semantics differ from positional args (the target is
+ * extracted separately by the redirect scan / `extractRedirects`), and the
+ * extractor must not resolve the whole token as a bare-dir read target.
+ * Used to keep the bare-dir exemption narrow (fail-closed): only a *pure*
+ * bare word (no operator) qualifies for the read-only bare-dir exemption.
+ */
+function containsRedirectOperator(token: string): boolean {
+  if (!token) return false;
+  // fd 复制/关闭（`2>&1`、`>&2`、`2>&-`）与文件/输入重定向（`>`/`>>`/`<`/`2>`）。
+  // 逐字符扫描，避开引号内的 `>`/`<`（`cat "a>b"` 是字面文件名，非重定向）。
+  let quote: null | "'" | '"' = null;
+  let escaped = false;
+  for (const ch of token) {
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (quote === "'") { if (ch === "'") quote = null; continue; }
+    if (quote === '"') { if (ch === '"') quote = null; continue; }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (ch === ">" || ch === "<") return true;
+  }
+  return false;
+}
+
+/**
  * 命令类型分类（D2a 条件 9 用）：位置参数代表文件访问路径的命令。
  * 这些命令的非 flag 位置参数是路径/文件引用，其真实落点依赖 cwd；
  * 不可提取的裸词（looksLikePath=false）必须在 D2a 下排除（维持 cd_chdir）。
@@ -535,25 +561,6 @@ const OUTPUT_FLAG_COMMANDS: Record<string, { withArg: string[]; noArg: string[] 
 const OUTPUT_NOARG_SENTINEL = "\0output-noarg";
 
 /**
- * grep 的 PATTERN 参数不是路径引用：跳过第一个非 flag 位置参数（或
- * -e/-f 指定的 pattern 值），只把其余位置参数当作文件引用。
- */
-function grepPatternSkipIdx(tokens: string[]): Set<number> {
-  const skip = new Set<number>();
-  let i = 1;
-  let sawNonOpt = false;
-  while (i < tokens.length) {
-    const t = tokens[i];
-    if (t === "-e" || t === "-f") { if (i + 1 < tokens.length) skip.add(i + 1); i += 2; continue; }
-    if ((t.startsWith("-e") && t.length > 2) || (t.startsWith("-f") && t.length > 2)) { i += 1; continue; }
-    if (t.startsWith("-")) { i += 1; continue; }
-    if (!sawNonOpt) { skip.add(i); sawNonOpt = true; }
-    i += 1;
-  }
-  return skip;
-}
-
-/**
  * 判断 token 是否以重定向形态开头（tokenize 不拆分这些形态，如
  * `2>/dev/null`、`>foo`、`2>&1`、`<in`）。这类 token 的重定向目标已由
  * collectStagePathRefs 末尾的重定向扫描单独提取（`N>`/`N>>`/`2>&N`/`>`/
@@ -620,10 +627,28 @@ function collectStagePathRefs(stage: string): string[] {
     const cmdBase = tokens[0].split("/").pop()!;
     if (FILE_ARG_COMMANDS.has(cmdBase)) {
       const grepSkip = cmdBase === "grep" ? grepPatternSkipIdx(tokens) : new Set<number>();
+      // find 位置参数收集跟踪：无路径操作数（`find -type f`）时 find 默认起点
+      // 是 `.`（cwd 锚点），真实枚举 cd 目标整树——必须视同含 cwd 锚点，否则
+      // flag 值跳过后 refs 为空，条件 9 无 ref 可查 → d2a 保持 true →
+      // `reliable:true + 0 target` 静默放行读外区（收尾 review critical）。
+      let findHasPosArg = false;
       for (let i = 1; i < tokens.length; i++) {
         if (grepSkip.has(i)) continue;
         const t = tokens[i];
         if (t.startsWith("-")) continue;
+        // find：flag 值参数不是路径引用（`-type f` 的 `f`、`-maxdepth 2` 的
+        // `2`、`-name '*.ts'` 的 `*.ts`），跳过收集——收集它们会误判为不可提取
+        // 裸词（`looksLikePath("f")`=false）而排除 cd 跟踪豁免（根因 B）。
+        // 复用 FIND_NONPATH_FLAG_ARGS 共享常量（单一事实源，提取侧 readExtract
+        // 同步跳过）。前一个 token 是 find 的 flag 且该 flag 值确定非路径。
+        if (
+          cmdBase === "find" &&
+          i >= 2 &&
+          tokens[i - 1].startsWith("-") &&
+          FIND_NONPATH_FLAG_ARGS.has(tokens[i - 1])
+        ) {
+          continue;
+        }
         // 重定向形态 token（`2>/dev/null`、`>foo`、`2>&1`、`<in`）不是位置
         // 参数——其重定向目标已由下方扫描提取为 ref（或纯 fd 复制无文件
         // 目标）。跳过避免把 `2>/dev/null` 整串当非绝对引用收集，杀 cd 豁免
@@ -641,6 +666,12 @@ function collectStagePathRefs(stage: string): string[] {
           continue;
         }
         refs.push(t);
+        if (cmdBase === "find") findHasPosArg = true;
+      }
+      // find 无路径操作数 → 隐含 `.`（cwd 锚点）起点，push 哨兵供条件 9 的
+      // containsCwdAnchor 杀 d2a（fail-closed，与 `find .` 同判 cd_chdir）。
+      if (cmdBase === "find" && !findHasPosArg) {
+        refs.push(".");
       }
     } else if (OUTPUT_FLAG_COMMANDS[cmdBase]) {
       // F1：curl/wget 的输出写目标 flag 值是真实文件写目标，必须收集供
@@ -890,12 +921,32 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   if (d2a) {
     for (const stage of downstreamStages) {
       const refs = collectStagePathRefs(stage);
+      // 该 stage 的命令是否可把裸词目录提取为 read target（D2a 下消费
+      // resolveBase）——条件 9 收窄判据：read-only 可提取命令的裸词目录
+      // 不再排除（提取侧解析为 target），write/无 extractor 命令仍排除。
+      const stageTokens = tokenize(stage);
+      const stageCmdBase = stageTokens.length > 0 ? stageTokens[0].split("/").pop()! : "";
+      const bareDirExtractable = canExtractBareDir(stageCmdBase);
       for (const ref of refs) {
         if (containsCwdAnchor(ref)) { d2a = false; break; }
         if (containsUnquotedGlob(ref)) { d2a = false; break; }
         if (isNetOrFdTarget(ref)) { d2a = false; break; }
-        // 条件 9：非绝对 + 非网络/fd + 不可提取裸词 → 排除。
-        if (!isExplicitAbsolutePath(ref) && !isNetOrFdTarget(ref) && !looksLikePath(ref)) { d2a = false; break; }
+        // 条件 9（收窄）：非绝对 + 非网络/fd + 不可提取裸词 → 排除。
+        // 例外：该 stage 是 read-only 可提取命令（canExtractBareDir）时，
+        // 纯裸词目录不排除——提取侧 bareDirOk 会把它解析为 read target，
+        // 决策层仍按真实路径判定，不构成静默放行。含重定向操作符的 ref
+        // （裸 `>`、`foo>bar`、`&>log`、`2>/dev/null` 等）不是裸词目录，仍
+        // 排除（保守维持原版 cd_chdir，fail-closed——重定向目标语义与
+        // 位置参数不同，提取侧不会把它们解析为真实目录）。
+        if (
+          !isExplicitAbsolutePath(ref) &&
+          !isNetOrFdTarget(ref) &&
+          !looksLikePath(ref) &&
+          (!bareDirExtractable || containsRedirectOperator(ref))
+        ) {
+          d2a = false;
+          break;
+        }
       }
       if (stage.includes("$PWD") || stage.includes("$OLDPWD")) { d2a = false; break; }
       // Also scan whole raw stage for unquoted glob (not just path refs).

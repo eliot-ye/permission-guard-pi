@@ -8,6 +8,93 @@ import type { ExtractAction } from "./parse.ts";
 
 export type Extractor = (tokens: string[], targets: Array<{ action: ExtractAction; path: string }>, projectRoot: string) => void;
 
+/**
+ * find 的「值不是文件路径」flag 集合（共享常量，单一事实源）。
+ *
+ * 这些 flag 的下一个 token 是查询条件（`-type f` 的 `f`、`-maxdepth 2` 的
+ * `2`、`-name '*.ts'` 的 `*.ts`、`-size +1M` 的 `+1M`），不是文件路径引用。
+ * `collectStagePathRefs`（决策侧）与 `readExtract`（提取侧）MUST 复用本集合
+ * 跳过这些值——收集它们会误判为「不可提取裸词」（`looksLikePath("f")`=false）
+ * 而排除 cd 跟踪豁免，导致 `cd /abs && find /abs/src -type f` 误报 `cd_chdir`。
+ *
+ * 刻意**不含**「值是路径引用」的 flag：`-newer`/`-newerat`/`-newerct`/
+ * `-samefile`/`-fprint`/`-fprintf`（第一个值是文件引用，真实落点依赖 cwd，
+ * 必须保持收集供条件 9 排除，fail-closed）——只跳过值确定非路径的 flag。
+ */
+export const FIND_NONPATH_FLAG_ARGS = new Set([
+  "-type", "-name", "-iname", "-path", "-ipath",
+  "-regex", "-iregex",
+  "-maxdepth", "-mindepth",
+  "-size", "-mtime", "-atime", "-ctime", "-amin", "-cmin", "-mmin",
+  "-user", "-group", "-perm", "-inum", "-links",
+  "-printf", "-fstype",
+  "-newermt",
+]);
+
+/**
+ * read-only 文件参数命令集合（共享常量，单一事实源）。
+ *
+ * 这些命令在 COMMAND_TABLE 注册 `readExtract`（或 `findExtract` = `readExtract`），
+ * extractor 可消费 `resolveBase` 把裸词目录提取为 read target。cd 跟踪豁免
+ * （D2a）适用时，这些命令的裸词目录位置参数（`src`、`dist/`、`node_modules/...`）
+ * 不再被条件 9「不可提取裸词排除」排除，改经 `resolveBase` 解析为绝对 read target。
+ *
+ * 刻意**不含** write/delete 命令（`rm`/`mkdir`/`mv`/`cp`/`touch`/`chmod` 等）
+ * 与无 extractor 命令（`sort`/`tar`/`cmp` 等）——write 裸词无法安全提取（若放行
+ * 会 0-target 静默放行写），无 extractor 裸词无法消费 `resolveBase`（条件 10
+ * 排除），均维持 `cd_chdir`（fail-closed）。
+ *
+ * 谓词 `canExtractBareDir(cmdBase)` = `BARE_DIR_EXTRACTABLE.has(cmdBase)`。
+ * 决策侧（shell-forwarder 条件 9 收窄）与提取侧（entry.ts bareDirOk 传递）MUST
+ * 复用本集合，避免两处判「可提取」/「不可提取」分歧导致 0-target 静默放行。
+ */
+export const BARE_DIR_EXTRACTABLE = new Set([
+  "cat", "head", "tail", "wc", "grep", "ls", "find", "tree", "stat", "du",
+  "df", "file", "less", "more",
+]);
+
+/**
+ * 谓词：命令是否可把裸词目录提取为 read target（D2a 下消费 `resolveBase`）。
+ * 单一事实源——决策侧（条件 9 收窄）与提取侧（entry.ts bareDirOk）共同引用。
+ */
+export function canExtractBareDir(cmdBase: string): boolean {
+  return BARE_DIR_EXTRACTABLE.has(cmdBase);
+}
+
+/**
+ * grep 的 PATTERN 参数不是路径引用（共享，单一事实源）：跳过第一个非 flag
+ * 位置参数（或 -e/-f 指定的 pattern 值），只把其余位置参数当作文件引用。
+ * 决策侧（collectStagePathRefs）与提取侧（readExtract.bareDirOk）复用——
+ * 避免提取侧把 grep 的 PATTERN（`grep foo bar` 的 `foo`）当裸词目录 push。
+ */
+export function grepPatternSkipIdx(tokens: string[]): Set<number> {
+  const skip = new Set<number>();
+  let i = 1;
+  let sawNonOpt = false;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t === "-e" || t === "-f") {
+      // `-e`/`-f` 已显式提供 pattern（其值跳过），后续非 flag token 是文件
+      // 引用而非第一个 PATTERN——置 sawNonOpt=true 防止误跳过真实文件
+      // （`grep -e pattern sub` 的 `sub` 必须收集供条件 9 / bareDirOk 提取）。
+      if (i + 1 < tokens.length) skip.add(i + 1);
+      sawNonOpt = true;
+      i += 2;
+      continue;
+    }
+    if ((t.startsWith("-e") && t.length > 2) || (t.startsWith("-f") && t.length > 2)) {
+      // 内联 `-epattern`/`-fpattern` 同样已提供 pattern。
+      sawNonOpt = true;
+      i += 1;
+      continue;
+    }
+    if (t.startsWith("-")) { i += 1; continue; }
+    if (!sawNonOpt) { skip.add(i); sawNonOpt = true; }
+    i += 1;
+  }
+  return skip;
+}
+
 // Extract target paths from `mv` (2 args: src, dst).
 
 export const mvExtract: Extractor = (tokens, targets, root) => {
@@ -45,10 +132,36 @@ export const rmExtract: Extractor = (tokens, targets, root) => {
 // file, less, more). All treated as read actions.
 
 export const readExtract: Extractor = (tokens, targets, root) => {
-  // Skip the command; then skip leading flags and their values.
+  // bareDirOk 是函数签名层面的可选参（非 Extractor 类型扩展，向后兼容）：
+  // cd 跟踪豁免（D2a）适用时，entry.ts 按 COMMAND_TABLE[cmd] === readExtract
+  // 身份分派，传 bareDirOk=true，使裸词目录（looksLikePath=false 的 src/dist）
+  // 也经 resolveBase 解析为 read target。非 cd 场景默认 false，行为不变。
+  readExtractWithBareDir(tokens, targets, root, false);
+};
+
+/**
+ * readExtract 的实现体 + bareDirOk 扩展。
+ * 与 readExtract 同逻辑；bareDirOk=true 时，裸词目录（looksLikePath=false 的
+ * 无扩展名相对目录）也经 resolveBase 解析为 read target。
+ *
+ * 同步跳过（与决策侧 collectStagePathRefs 一致，W1/W2 收敛）：
+ *  - grep：PATTERN 参数（grepPatternSkipIdx，单一事实源）不是路径引用，不 push。
+ *  - find：FIND_NONPATH_FLAG_ARGS 的值（`-type f` 的 `f` 等）不是路径引用，
+ *    不 push——否则 bareDirOk 会把 `f`/`2` 当裸词目录 push（目标集污染）。
+ */
+export function readExtractWithBareDir(
+  tokens: string[],
+  targets: Array<{ action: ExtractAction; path: string }>,
+  root: string,
+  bareDirOk: boolean,
+): void {
+  const cmdBase = tokens.length > 0 ? tokens[0].split("/").pop()! : "";
   const args = tokens.slice(1);
+  const grepSkip = cmdBase === "grep" ? grepPatternSkipIdx(tokens) : new Set<number>();
   for (let i = 0; i < args.length; i++) {
     const t = args[i];
+    // grep PATTERN 参数（tokens 索引 = args 索引 + 1）不是路径引用。
+    if (grepSkip.has(i + 1)) continue;
     if (t.startsWith("-")) {
       // Flags like -n, -l, --line-numbers, --bytes N etc. Skip one arg if
       // it looks like a flag that takes an argument.
@@ -67,11 +180,39 @@ export const readExtract: Extractor = (tokens, targets, root) => {
       }
       continue;
     }
+    // find 的 flag 值（`-type f` 的 `f` 等）不是路径引用——bareDirOk 下
+    // 不 push（复用 FIND_NONPATH_FLAG_ARGS，与决策侧一致）。
+    if (
+      cmdBase === "find" &&
+      i >= 1 &&
+      args[i - 1].startsWith("-") &&
+      FIND_NONPATH_FLAG_ARGS.has(args[i - 1])
+    ) {
+      continue;
+    }
     if (looksLikePath(t)) {
+      targets.push({ action: "read", path: toAbsolutePath(expandHome(t), root) });
+    } else if (bareDirOk && t && !t.startsWith("-") && !isRedirectTargetToken(t)) {
+      // 裸词目录（src/dist/node_modules/...）：D2a 下经 resolveBase 解析为
+      // read target。排除重定向形态 token（`2>/dev/null` 等，其目标已由
+      // extractRedirects 提取）与 flag 值。
       targets.push({ action: "read", path: toAbsolutePath(expandHome(t), root) });
     }
   }
-};
+}
+
+/**
+ * 是否为重定向形态 token（`2>/dev/null`、`>foo`、`2>&1`、`<in`、`<<EOF` 等，
+ * tokenize 不拆分这些形态）。bareDirOk 下把裸词目录 push 为 read target 前，
+ * 需排除这类 token——其重定向目标已由 extractRedirects 单独提取，push 整串
+ * 会把 `2>/dev/null` 当 `/cd目标/2>/dev/null` 假目标（目标集污染）。
+ */
+function isRedirectTargetToken(token: string): boolean {
+  if (!token) return false;
+  if (/^[0-9]*>&(?:[0-9]+|-)$/.test(token)) return true; // fd 复制/关闭
+  if (/^[0-9]*(?:>>|>|<).+/.test(token) && !token.includes("&") && !/^[0-9]*<</.test(token)) return true;
+  return false;
+}
 
 // Extract target paths from `sed` (bash-sed-readonly-exempt, D2). Only reached
 // when the sed read-only exemption holds (write/exec forms are intercepted by
