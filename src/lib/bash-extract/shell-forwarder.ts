@@ -729,6 +729,79 @@ function collectStagePathRefs(stage: string): string[] {
 }
 
 /**
+ * bash-cd-readonly-exemption-reason-observability b1 (design D1): split a
+ * compound command into fragments, each tagged with the separator that
+ * PRECEDES it ("start" for the first fragment, or "&&" / "||" / ";" / "&" /
+ * "\n"). The plain `splitCommands` drops separator info, which `analyzeCd`
+ * needs to (a) distinguish pure-`&&` chains from mixed chains and (b) apply
+ * the stricter no-bareDirOk path check to `;`/`||`-originated fragments.
+ *
+ * The scanner mirrors `splitCommands`' quote/escape awareness (and reuses its
+ * `isAmpBackgroundSeparator` so `2>&1` / `&>` are not treated as separators).
+ */
+type CdFragment = { frag: string; sepBefore: string };
+
+function splitCommandsWithSep(cmd: string): CdFragment[] {
+  const parts: CdFragment[] = [];
+  let cur = "";
+  let quote: null | "'" | '"' = null;
+  let escaped = false;
+  let i = 0;
+  let sepBefore = "start";
+  const flush = () => {
+    if (cur.trim()) { parts.push({ frag: cur.trim(), sepBefore }); }
+    cur = "";
+  };
+  while (i < cmd.length) {
+    const ch = cmd[i];
+    if (escaped) { cur += ch; escaped = false; i += 1; continue; }
+    if (quote === "'") { cur += ch; if (ch === "'") quote = null; i += 1; continue; }
+    if (ch === "\\") { cur += ch; escaped = true; i += 1; continue; }
+    if (quote === '"') { cur += ch; if (ch === '"') quote = null; i += 1; continue; }
+    if (ch === "'") { quote = "'"; cur += ch; i += 1; continue; }
+    if (ch === '"') { quote = '"'; cur += ch; i += 1; continue; }
+    if (cmd.startsWith("&&", i)) { flush(); sepBefore = "&&"; i += 2; continue; }
+    if (cmd.startsWith("||", i)) { flush(); sepBefore = "||"; i += 2; continue; }
+    if (ch === ";") { flush(); sepBefore = ";"; i += 1; continue; }
+    if (ch === "&" && isAmpBackgroundSeparator(cmd, i)) { flush(); sepBefore = "&"; i += 1; continue; }
+    if (ch === "\n") { flush(); sepBefore = "\n"; i += 1; continue; }
+    cur += ch;
+    i += 1;
+  }
+  flush();
+  return parts;
+}
+
+/**
+ * bash-cd-readonly-exemption-reason-observability b1 (design D1/D2): the
+ * STRICTER path-safety check applied to `;`/`||`-originated stages.
+ *
+ * Rationale: in a `;`/`||` chain a cd may fail and downstream still runs, so
+ * the cwd is not statically determinable. The `&&`-segment bareDirOk exemption
+ * (condition 9) relies on the tracked cwd being certain; that does NOT hold
+ * for `;`/`||` segments, so any cwd-relative reference — whether
+ * `looksLikePath`-extractable or not, including cwd anchors, unquoted globs
+ * and `$PWD` — fails the check. There is NO bareDirOk exemption here.
+ *
+ * Returns true when a cwd-relative reference is present (→ fail d2a).
+ */
+function hasCwdRelativeRefInStage(stage: string): boolean {
+  const refs = collectStagePathRefs(stage);
+  for (const ref of refs) {
+    if (isNetOrFdTarget(ref)) continue; // network/fd, not cwd-relative
+    if (isExplicitAbsolutePath(ref)) continue; // absolute, cwd-independent
+    if (containsCwdAnchor(ref)) return true;
+    if (containsUnquotedGlob(ref)) return true;
+    // Whether looksLikePath is true (rel.txt, dist/) or false (bare word
+    // `sub`), a non-absolute reference depends on the (undeterminable) cwd.
+    return true;
+  }
+  if (containsUnquotedGlob(stage)) return true;
+  if (stage.includes("$PWD") || stage.includes("$OLDPWD")) return true;
+  return false;
+}
+
+/**
  * Check whether a downstream stage has a path-bearing positional argument or
  * redirect target that is NOT an explicit absolute path (i.e. is cwd-relative
  * or otherwise cwd-dependent). Used to reject the all-absolute-downstream
@@ -808,8 +881,12 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   const fragments = splitCommands(cmd);
   if (fragments.length < 2) return { hasCd: false, d2a: false, d2b: false };
 
-  const cdFragments: Array<{ frag: string; cdTarget: string }> = [];
-  for (const frag of fragments) {
+  // b1 (design D1): split with separator provenance so we can (a) tell a pure
+  // `&&` chain from a mixed one and (b) apply the stricter no-bareDirOk path
+  // check to `;`/`||`-originated fragments.
+  const fragsWithSep = splitCommandsWithSep(cmd);
+  const cdFragments: Array<{ frag: string; cdTarget: string; sepBefore: string }> = [];
+  for (const { frag, sepBefore } of fragsWithSep) {
     const trimmed = frag.trim();
     if (!trimmed) continue;
     const tokens = tokenize(trimmed);
@@ -817,7 +894,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
     const firstBase = tokens[0].split("/").pop()!;
     if (firstBase === "cd") {
       const cdTarget = tokens[1] ?? "";
-      cdFragments.push({ frag: trimmed, cdTarget });
+      cdFragments.push({ frag: trimmed, cdTarget, sepBefore });
     }
   }
   if (cdFragments.length === 0) return { hasCd: false, d2a: false, d2b: false };
@@ -827,33 +904,29 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   let d2b = true;
 
   // --- D2a: cd-tracking exemption ---
-  // Condition 1: pure `&&` chain (all separators between fragments are `&&`).
-  {
-    const pureAnd = (() => {
-      let i = 0;
-      let expectAnd = false;
-      while (i < cmd.length) {
-        const ch = cmd[i];
-        if (ch === "\\") { i += 2; continue; }
-        if (ch === "'") { i += 1; while (i < cmd.length && cmd[i] !== "'") i += 1; i += 1; continue; }
-        if (ch === '"') { i += 1; while (i < cmd.length && cmd[i] !== '"') i += 1; i += 1; continue; }
-        if (cmd.startsWith("&&", i)) { i += 2; expectAnd = false; continue; }
-        if (cmd.startsWith("||", i)) { return false; }
-        // 复用 parse.ts 的 & 分隔符判定——`2>&1`（fd-dup）/`N>&-`（fd-close）/
-        // `&>`/`& >` 的 `&` 是重定向操作符，不是后台分隔符，不构成非纯 `&&` 链
-        // 的证据（spec 条件 1 要求复用 splitCommands 的 quote-aware 扫描）。
-        if (ch === "&") {
-          if (isAmpBackgroundSeparator(cmd, i)) { return false; }
-          i += 1;
-          continue;
-        }
-        if (ch === ";" || ch === "\n") return false;
-        i += 1;
-      }
-      return !expectAnd;
-    })();
-    if (!pureAnd) d2a = false;
+  // Condition 1 (design D1, b1 放宽): 分段检查而非移除护栏。separatorType 记为
+  // "mixed"（存在 `;`/`||`/`\n`/后台 `&` 分隔符）时**不再立即 fail d2a**——继续
+  // 进入条件 2-11 的下游片段检查，但 `;`/`||` 来源的片段走更严的
+  // `hasCwdRelativeRefInStage`（无 bareDirOk 豁免，design D1 加严作用域）。
+  const separatorType: "pure-and" | "mixed" = fragsWithSep.every(
+    (f) => f.sepBefore === "start" || f.sepBefore === "&&",
+  ) ? "pure-and" : "mixed";
+
+  // Condition 1b (design D1 加严作用域①②，架构 review critical 1 修正): `;`/`||`
+  // 之后的 `cd` 片段 MUST fail d2a（无论相对/绝对目标）。理由：`;` 下前一个 cd
+  // 可能失败，后一个 cd 的落点（及其后下游片段的 cwd 基线）依赖"前一个 cd 是否
+  // 成功"，不可静态确定；顺序模拟 cwd 会把下游相对路径解析到错误落点（如
+  // `cd /abs && ls; cd rel && grep x dist/` 的 `dist/` 误解析为 `<原cwd>/rel/dist`）。
+  if (separatorType === "mixed" && d2a) {
+    const postSepCd = cdFragments.find(
+      (cd) => cd.sepBefore !== "start" && cd.sepBefore !== "&&",
+    );
+    if (postSepCd) d2a = false;
   }
+  // 说明：原「pureAnd 即 fail」的护栏被上面两步取代——mixed 时不再无条件 fail d2a，
+  // 而是靠条件 1b（`;`/`||` 后 cd）+ 下游 `;`/`||` 片段的 hasCwdRelativeRefInStage
+  // 加严（见 downstreamStages 遍历）保证 fail-closed。`;` 后无 cd 且各 `;` 片段均
+  // 无 cwd 相对引用时豁免成立（b1 放宽目标）。
 
   // Condition 2: all cd targets explicit absolute (no `~`, `$`, glob, relative).
   if (d2a) {
@@ -885,11 +958,12 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // fragment). 条件 3 放宽后下游片段允许管道——每个 pipeline stage 继承
   // cd 后 cwd，路径语义与下游片段一致，故展平为 stage 粒度作为条件 4~11
   // 与 D2b 的判定单元（fragment 全文喂入会把 `|` 后内容超范围当路径引用，
-  // stage 级为准更精确）。
-  const downstreamStages: string[] = [];
+  // stage 级为准更精确）。b1：同时标记该 stage 前置分隔符，供 `;`/`||` 来源
+  // 片段的加严检查（design D1 加严作用域①）。
+  const downstreamStages: Array<{ stage: string; sepBefore: string }> = [];
   {
     let cdSeen = false;
-    for (const frag of fragments) {
+    for (const { frag, sepBefore } of fragsWithSep) {
       const trimmed = frag.trim();
       if (!trimmed) continue;
       const tokens = tokenize(trimmed);
@@ -899,7 +973,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
       if (cdSeen) {
         for (const st of splitPipelines(trimmed)) {
           const stTrimmed = st.trim();
-          if (stTrimmed) downstreamStages.push(stTrimmed);
+          if (stTrimmed) downstreamStages.push({ stage: stTrimmed, sepBefore });
         }
       }
     }
@@ -920,7 +994,14 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // (`echo x > sub`), fixing the critical gap where condition 7 only checked
   // write/delete positional args.
   if (d2a) {
-    for (const stage of downstreamStages) {
+    for (const { stage, sepBefore } of downstreamStages) {
+      // b1 (design D1 加严作用域①): `;`/`||` 来源片段走更严检查——无 bareDirOk
+      // 豁免，任何 cwd 相对引用（无论 looksLikePath true/false）即 fail d2a。
+      // 放在条件 4-9 之前，作为该片段的 fail-closed 加严入口。
+      if (sepBefore !== "start" && sepBefore !== "&&" && hasCwdRelativeRefInStage(stage)) {
+        d2a = false;
+        break;
+      }
       const refs = collectStagePathRefs(stage);
       // 该 stage 的命令是否可把裸词目录提取为 read target（D2a 下消费
       // resolveBase）——条件 9 收窄判据：read-only 可提取命令的裸词目录
@@ -961,7 +1042,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // absolute or looksLikePath-extractable. Reject unextractable relative args.
   if (d2a) {
     const WRITE_DELETE = new Set(["rm", "mkdir", "rmdir", "mv", "cp", "touch", "ln", "chmod", "chown", "truncate", "dd", "tee", "install"]);
-    for (const stage of downstreamStages) {
+    for (const { stage } of downstreamStages) {
       const tokens = tokenize(stage);
       if (tokens.length === 0) continue;
       const cmdBase = tokens[0].split("/").pop()!;
@@ -993,7 +1074,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // exemption (falls back to cd_chdir). Absolute-only no-extractor commands
   // (e.g. `cd /etc && sort /tmp/data.txt`) still pass D2b and are exempt.
   if (d2a) {
-    for (const stage of downstreamStages) {
+    for (const { stage } of downstreamStages) {
       const tokens = tokenize(stage);
       if (tokens.length === 0) continue;
       const cmdBase = tokens[0].split("/").pop()!;
@@ -1029,7 +1110,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
     const cdLanding = lastCd && lastCd.cdTarget ? lastCd.cdTarget : "";
     const cdInTmp = cdLanding !== "" && isDefaultTmpPath(cdLanding);
     if (!cdInTmp) {
-      for (const stage of downstreamStages) {
+      for (const { stage } of downstreamStages) {
         if (isGitWriteSubcommand(stage)) { d2a = false; break; }
       }
     }
@@ -1038,7 +1119,7 @@ export function analyzeCd(cmd: string): { hasCd: boolean; d2a: boolean; d2b: boo
   // --- D2b: all-absolute-downstream exemption ---
   if (d2b) {
     let anyAbsRef = false;
-    for (const stage of downstreamStages) {
+    for (const { stage } of downstreamStages) {
       if (hasExplicitAbsPathRef(stage)) anyAbsRef = true;
       // Any relative (cwd-dependent) ref blocks the exemption.
       if (hasCwdRelativePathRef(stage)) { d2b = false; break; }

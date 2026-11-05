@@ -2087,3 +2087,249 @@ test("AF2-A1: unreliable bash \"always allow this command\" persists to bashGran
     assert.equal(rec.grant_source, "bash_grant_memory");
   });
 });
+
+// -------- AL-BR: bash_reason 审计观测字段（bash-cd-readonly-exemption-reason-observability b2）--------
+// 口径：凡 bash 提取 !reliable 即写 bash_reason（值为 extractor reason 原文）；
+// 可靠 bash 记录、文件工具记录不写该字段。旧日志缺字段仍可解析（可选字段）。
+
+test("AL-BR-1: unreliable_bash_prompt_records_bash_reason", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+
+    // cd_chdir 形态：`;` 后含 cwd 相对引用 rel.txt → 走 cd 豁免 fail → cd_chdir → prompt
+    const command = "cd /etc && ls; cat rel.txt";
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async () => UI.allowSession,
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-br1",
+      input: { command },
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-br1");
+    assert.ok(rec, "expected audit record for unreliable bash prompt");
+    assert.equal(rec.tool, "bash");
+    assert.equal(
+      rec.bash_reason,
+      "cd_chdir",
+      `unreliable bash record must carry bash_reason="cd_chdir", got: ${JSON.stringify(rec.bash_reason)}`,
+    );
+  });
+});
+
+test("AL-BR-2: glob_expansion_reason_falls_into_bash_reason", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      "{}",
+      "utf8",
+    );
+
+    // glob_expansion 形态：未加引号 * 且无 bounded-glob 豁免 → glob_expansion → prompt
+    const command = "rm -rf /etc/*.log";
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async () => UI.allowSession,
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-br2",
+      input: { command },
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-br2");
+    assert.ok(rec, "expected audit record for glob_expansion bash prompt");
+    assert.equal(
+      rec.bash_reason,
+      "glob_expansion",
+      `expected bash_reason="glob_expansion", got: ${JSON.stringify(rec.bash_reason)}`,
+    );
+  });
+});
+
+test("AL-BR-3: reliable_bash_record_has_no_bash_reason", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      JSON.stringify({ paths: { "/etc/hosts": "read_only" } }),
+      "utf8",
+    );
+
+    const command = "cat /etc/hosts";
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-br3",
+      input: { command },
+    });
+    assert.equal(result, undefined, "reliable bash read_only read should auto-allow");
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-br3");
+    assert.ok(rec, "expected auto_allow audit for reliable bash");
+    assert.equal(rec.event, "auto_allow");
+    assert.equal(
+      "bash_reason" in rec,
+      false,
+      `reliable bash record must NOT carry bash_reason, got: ${JSON.stringify(rec.bash_reason)}`,
+    );
+  });
+});
+
+test("AL-BR-4: file_tool_record_has_no_bash_reason", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    // No config → unconfigured outer write → prompt → deny
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async () => UI.deny,
+      projectRoot: "/proj",
+    });
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    await fireToolCall(pi, ctx, {
+      toolName: "write",
+      toolCallId: "tc-br4",
+      input: { path: "/outside/x.txt", content: "hi" },
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    const raw = await (await import("node:fs/promises")).readFile(
+      join(dir, "logs", "permission-review.jsonl"),
+      "utf8",
+    ).catch(() => "");
+    const lines = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = lines.find((l) => l.toolCallId === "tc-br4");
+    assert.ok(rec, "expected audit record for file tool deny");
+    assert.notEqual(rec.tool, "bash");
+    assert.equal(
+      "bash_reason" in rec,
+      false,
+      `file-tool record must NOT carry bash_reason, got: ${JSON.stringify(rec.bash_reason)}`,
+    );
+  });
+});
+
+test("AL-BR-5: legacy_audit_line_without_bash_reason_still_parses", async () => {
+  // 旧日志（无 bash_reason 字段）MUST 仍可正常解析——可选字段向后兼容。
+  await withTmpDir(async (dir) => {
+    const logDir = join(dir, "logs");
+    await mkdir(logDir, { recursive: true });
+    const logPath = join(logDir, "permission-review.jsonl");
+    // 手写一条无 bash_reason 的历史记录
+    const legacyLine = JSON.stringify({
+      event: "allow_once",
+      tool: "bash",
+      project: "hash1",
+      projectRoot: "/proj",
+      path: null,
+      command: "git status",
+      region: "project_inner",
+      declaration: "unconfigured",
+      permission: null,
+      toolCallId: "tc-legacy",
+      ts: "2026-10-01T00:00:00.000Z",
+    });
+    await (await import("node:fs/promises")).writeFile(logPath, legacyLine + "\n", "utf8");
+
+    const raw = await readFile(logPath, "utf8");
+    const parsed = raw.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const rec = parsed.find((l) => l.toolCallId === "tc-legacy");
+    assert.ok(rec, "legacy line without bash_reason must parse");
+    assert.equal(rec.event, "allow_once");
+    assert.equal(
+      "bash_reason" in rec,
+      false,
+      "legacy record has no bash_reason (backward compatible)",
+    );
+  });
+});

@@ -65,6 +65,14 @@ export interface AuditRecord {
   authorization?: Authorization;
   // Design D3/D4: fine-grained source of the firing rule/memory entry.
   grant_source?: GrantSource;
+  // bash-cd-readonly-exemption-reason-observability b2: bash extractor reason
+  // for unreliable bash commands (e.g. "cd_chdir", "glob_expansion",
+  // "command_substitution"). Written iff tool=bash and extraction is
+  // !reliable; reliable bash and file-tool records omit this field. Value is
+  // the extractor reason verbatim (BASH_REASON_CODES, never renamed). Backward
+  // compatible: legacy log lines without this field still parse. Observation
+  // only — MUST NOT affect any permission decision.
+  bash_reason?: string;
 }
 
 export interface AuditLogger {

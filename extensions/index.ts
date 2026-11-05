@@ -654,6 +654,8 @@ export function registerPermissionGate(
             toolCallId: event.toolCallId,
             // Design D3: hard_deny is a system decision → presumed.
             authorization: "presumed",
+            // b2: !reliable bash → carry extractor reason for observability.
+            ...(extraction.reason ? { bash_reason: extraction.reason } : {}),
             note: `Bash command grant bypassed: unread hard-deny for ${absPath}`,
           });
           return { block: true, reason: `Unread config overrides bash command grant for ${absPath}` };
@@ -679,6 +681,8 @@ export function registerPermissionGate(
             ? "by_person"
             : "presumed",
         grant_source: "bash_grant_memory",
+        // b2: grant hit implies !reliable → carry extractor reason.
+        ...(extraction.reason ? { bash_reason: extraction.reason } : {}),
         note: `bash command grant memory hit${extraction.reason ? ` (${extraction.reason})` : ""}`,
       });
       return undefined;
@@ -701,6 +705,8 @@ export function registerPermissionGate(
           toolCallId: event.toolCallId,
           // Design D3: deny rule hit is a system decision → presumed.
           authorization: "presumed",
+          // b2: !reliable bash → carry extractor reason for observability.
+          ...(extraction.reason ? { bash_reason: extraction.reason } : {}),
           note: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"}) from ${ruleMatch.source}`,
         });
         return { block: true, reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"})` };
@@ -1010,6 +1016,12 @@ export function registerPermissionGate(
   ): Promise<ToolCallResultLike | undefined> {
     if (decision.kind !== "prompt") return undefined;
 
+    // b2: unreliable bash prompts carry the extractor reason as an audit
+    // observation field. File-tool prompts (bashCommand=null / bashReason
+    // undefined) and reliable bash prompts leave it off.
+    const bashReasonField =
+      bashCommand && bashReason ? { bash_reason: bashReason } : {};
+
     // Build the message for the prompt.
     let message = "";
     if (bashCommand) {
@@ -1078,6 +1090,7 @@ export function registerPermissionGate(
         // Design D3: 真人拒绝也是真人决策 → authorization = "by_person".
         authorization: "by_person",
         grant_source: promptGrantSource(decision, bashCommand, bashReason),
+        ...bashReasonField,
         note: isConflict
           ? `User denied a cross-source conflict prompt: ${decision.reason}`
           : decision.reason,
@@ -1107,6 +1120,7 @@ export function registerPermissionGate(
         toolCallId: event.toolCallId,
         authorization: "by_person",
         grant_source: promptGrantSource(decision, bashCommand, bashReason),
+        ...bashReasonField,
         note: decision.conflict ? `Cross-source conflict: ${decision.reason}` : undefined,
       });
       return undefined;
@@ -1140,6 +1154,7 @@ export function registerPermissionGate(
         toolCallId: event.toolCallId,
         authorization: "by_person",
         grant_source: promptGrantSource(decision, bashCommand, bashReason),
+        ...bashReasonField,
         note: decision.conflict ? `Cross-source conflict: ${decision.reason}` : bashCommand ? `bash command session grant (reason: ${bashReason ?? "unreliable"})` : undefined,
       });
       return undefined;
@@ -1170,6 +1185,7 @@ export function registerPermissionGate(
             toolCallId: event.toolCallId,
             authorization: "by_person",
             grant_source: promptGrantSource(decision, bashCommand, bashReason),
+            ...bashReasonField,
             note: `saved to ${prettyPath(state.trust.path)}`,
           });
         } catch (err) {
@@ -1198,6 +1214,7 @@ export function registerPermissionGate(
             toolCallId: event.toolCallId,
             authorization: "by_person",
             grant_source: promptGrantSource(decision, bashCommand, bashReason),
+            ...bashReasonField,
             note: "persistent write failed, downgraded to session",
           });
         }
@@ -1226,6 +1243,7 @@ export function registerPermissionGate(
             toolCallId: event.toolCallId,
             authorization: "by_person",
             grant_source: "bash_grant_memory",
+            ...bashReasonField,
             note: `bash command saved to ${prettyPath(state.trust.path)}`,
           });
         } catch (err) {
@@ -1253,6 +1271,7 @@ export function registerPermissionGate(
             toolCallId: event.toolCallId,
             authorization: "by_person",
             grant_source: "bash_grant_memory",
+            ...bashReasonField,
             note: "persistent bash write failed, downgraded to session",
           });
         }

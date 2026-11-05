@@ -3450,8 +3450,8 @@ test("BMG-RO-tilde-prefix-glob-reject: ls_tilde_prefix_glob_reject", () => {
 //   BMG-CD-rel-downstream-cd-track        cd 后相对路径下游 cd 跟踪豁免
 //   BMG-CD-mixed-abs-rel-cd-track         cd 后混合绝对+相对路径 cd 跟踪豁免
 //   BMG-CD-glob-rel-prefix-reject         cd 后 glob 相对前缀仍判不可靠（条件5排除）
-//   BMG-CD-no-explicit-ref-reject         cd 后无显式路径引用仍判不可靠（防空转）
-//   BMG-CD-silent-no-ref-reject           cd 后 SILENT 无显式路径引用仍判不可靠（防空转）
+//   BMG-CD-no-explicit-ref-reject         cd 后无显式路径引用（防空转）→ b1 后 reliable+0target（行为变化，见测试注释）
+//   BMG-CD-silent-no-ref-reject           cd 后 SILENT 无显式路径引用（防空转）→ b1 后 reliable+0target（行为变化）
 //   BMG-CD-dev-tcp-redirect-reject        cd 后网络套接字重定向仍判不可靠（网络外传防回归）
 //   BMG-CD-rel-cd-target-reject           cd 相对目标仍判不可靠（条件2排除）
 //   BMG-CD-tilde-cd-target-reject         cd 目标含 ~ 仍判不可靠（条件2排除）
@@ -3524,17 +3524,24 @@ test("BMG-CD-glob-rel-prefix-reject: cd_glob_rel_prefix_reject", () => {
 });
 
 test("BMG-CD-no-explicit-ref-reject: cd_no_explicit_ref_reject", () => {
-  // 防空转：`;` 分隔（D2a 条件 1 不满足），且下游 `ls` 无显式路径引用（D2b 条件 1 不满足）。
+  // 防空转：`;` 分隔，下游 `ls` 无显式路径引用。
+  // **行为变化（用户拍板 b，bash-cd-readonly-exemption-reason-observability b1，有意非回归）**：
+  // 原判 cd_chdir（防空转）。b1 放宽后，cd 绝对 + `;` 段 ls 无 cwd 相对引用 → cd 跟踪
+  // 豁免成立（d2a=true），cd 守卫不再命中 → reliable + 0 target。与 `&&` 段等价命令
+  // `cd /tmp/x && ls`（今天即 reliable+0 target）行为一致——零文件访问命令在 cwd 漂移下
+  // 无实际读/写危害，`;` 段对齐 `&&` 段既有行为，非静默放行（probe 已验证等价性）。
   const r = extractBashTargets("cd /tmp/x; ls", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable (b1 exemption), got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, []);
 });
 
 test("BMG-CD-silent-no-ref-reject: cd_silent_no_ref_reject", () => {
-  // 防空转：`;` 分隔，下游 `npm test` 无显式路径引用，SILENT_COMMANDS 不构成豁免证据。
+  // 防空转：`;` 分隔，下游 `npm test` 无显式路径引用。
+  // **行为变化（用户拍板 b，b1，有意非回归）**：原判 cd_chdir。b1 放宽后 reliable + 0 target，
+  // 与 `&&` 段 `cd /proj && npm test` 行为一致（见 BMG-CD-no-explicit-ref-reject 注释）。
   const r = extractBashTargets("cd /proj; npm test", "/proj");
-  assert.equal(r.reliable, false, `expected unreliable, got reliable`);
-  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+  assert.equal(r.reliable, true, `expected reliable (b1 exemption), got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, []);
 });
 
 test("BMG-CD-dev-tcp-redirect-reject: cd_dev_tcp_redirect_reject", () => {
@@ -5077,4 +5084,69 @@ test("literal_shell_c_targets_equivalent_to_direct_execution", () => {
       assert.deepEqual(sortedWrapped, sortedDirect, `bash -c "${inner}" targets must equal direct "${direct}" targets`);
     }
   }
+});
+
+// --- BM-CD-MIXED-1..5: cd 链含非 `&&` 分隔符时的只读豁免 ---
+// change: bash-cd-readonly-exemption-reason-observability b1（design D1 全片段作用域 + 架构 review 修正）
+// 安全前提：`;`/`||` 段比 `&&` 段更严——无 bareDirOk 豁免，任何 cwd 相对引用即 fail d2a（回退 cd_chdir）；
+// `;` 后不得再 cd（落点不可静态确定，顺序模拟 cwd 会误解析落点）。
+
+test("BM-CD-MIXED-1: cd_absolute_readonly_plus_cwd_irrelevant_fragments_exempt", () => {
+  // 豁免：cd 绝对 + `&&` 段只读探查（grep dist/ 提取为 <cd>/dist/ read）+ `;` 后
+  // 全 cwd 无关片段（echo 无路径、git log 只读无 pathspec、| head 纯 stdin 管道）。
+  // 行为变化（预期）：原判 cd_chdir（COND1 fail），现判 reliable + 提取真实读目标。
+  const r = extractBashTargets("cd /abs/pkg && grep x dist/ | head; echo ---; git log --oneline -5", "/proj");
+  assert.equal(r.reliable, true, `expected reliable (exemption), got ${JSON.stringify(r)}`);
+  // 裸词目录 dist/ 在 cd 跟踪下提取为 /abs/pkg/dist（无尾斜杠，见 BMG-CD-unextractable-read-*）
+  assert.deepEqual(r.targets, [{ action: "read", path: "/abs/pkg/dist" }]);
+});
+
+test("BM-CD-MIXED-2: semicolon_fragment_with_cwd_relative_ref_stays_cd_chdir", () => {
+  // `;` 后 cat rel.txt 含 cwd 相对引用 → fail-closed 回退 cd_chdir（保持现状）。
+  const r = extractBashTargets("cd /abs/pkg && ls; cat rel.txt", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BM-CD-MIXED-3: semicolon_fragment_with_write_command_stays_cd_chdir", () => {
+  // `;` 后 rm -rf sub 为写形态 + cwd 相对引用 → 双重拦截（保持现状）。
+  const r = extractBashTargets("cd /abs/pkg && ls; rm -rf sub", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BM-CD-MIXED-3b: semicolon_then_cd_relative_target_stays_cd_chdir", () => {
+  // 架构 review critical 1 反例：`;` 后 cd rel 相对目标——落点依赖前一个 cd 是否成功，
+  // 不可静态确定；顺序模拟 cwd 会把 dist/ 误解析到 <原cwd>/rel/dist 并 0-target 静默放行。
+  // spec 条件 1（`;` 后不得再 cd）排除豁免 → 回退 cd_chdir（保持现状）。
+  const r = extractBashTargets("cd /abs && ls; cd rel && grep x dist/", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable (cd_chdir), got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "cd_chdir");
+});
+
+test("BM-CD-MIXED-3c: semicolon_interpreter_reason_from_guard_not_cd_chdir", () => {
+  // 架构 review critical 3：`;` 后 node -e 解释器执行——条件 3 排除豁免，判不可靠。
+  // 豁免成立时 cd 守卫（步骤 2b）不再命中，落到步骤 4 isAnyUnreliableCommand
+  // （node 命中 UNRELIABLE_COMMANDS）产出 unreliable_command（非 cd_chdir）。
+  // **二次回写记录**：提案作者曾据改造前现状（cd_chdir）误判推翻 review，本期望已改回
+  // review 原结论（unreliable_command）。fail-closed 成立：仍判不可靠弹窗。
+  const r = extractBashTargets("cd /abs/pkg && ls; node -e \"require('fs')\"", "/proj");
+  assert.equal(r.reliable, false, `expected unreliable, got ${JSON.stringify(r)}`);
+  if (!r.reliable) assert.equal(r.reason, "unreliable_command");
+});
+
+test("BM-CD-MIXED-4: or_chain_readonly_probe_with_devnull_redirect_exempt", () => {
+  // 豁免：cd 绝对 + `||` 段 cwd 无关（echo）+ 2>/dev/null 良性重定向（/dev/null 绝对）。
+  // 行为变化（预期）：原判 cd_chdir（COND1 fail），现判 reliable + 提取真实读目标。
+  const r = extractBashTargets("cd /abs/pkg && ls dist/ 2>/dev/null || echo \"not found\"", "/proj");
+  assert.equal(r.reliable, true, `expected reliable (exemption), got ${JSON.stringify(r)}`);
+  // 裸词目录 dist/ 在 cd 跟踪下提取为 /abs/pkg/dist（无尾斜杠）
+  assert.deepEqual(r.targets, [{ action: "read", path: "/abs/pkg/dist" }]);
+});
+
+test("BM-CD-MIXED-5: existing_pure_and_chain_cd_tracking_exempt_unchanged", () => {
+  // 既有纯 `&&` 链 cd 跟踪豁免行为不变（非本 change 范围，锁定为回归基线）。
+  const r = extractBashTargets("cd /abs/pkg && ls -la", "/proj");
+  assert.equal(r.reliable, true, `expected reliable (pure && exemption), got ${JSON.stringify(r)}`);
+  assert.deepEqual(r.targets, []);
 });
