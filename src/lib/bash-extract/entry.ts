@@ -6,12 +6,63 @@ import { expandSafeVariables, extractRedirects, findUnresolvedVariable, splitCom
 import type { ExtractAction, ExtractResult } from "./parse.ts";
 import { scanControlFlow, scanFindWriteFlags } from "./control-flow.ts";
 import { scanUnreliable } from "./scan.ts";
-import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir, shouldTrackCdCwd } from "./shell-forwarder.ts";
+import { FORWARDING_COMMANDS, isForwarderStageSafe, isShellForwarder, scanCdChdir, shouldTrackCdCwd, extractShellCArg, isPureLiteralShellArg } from "./shell-forwarder.ts";
 import { toAbsolutePath } from "../path-utils.ts";
 import { GIT_BLOB_OK_SUBCOMMANDS, NPM_RUN_OK_SCRIPTS, SILENT_ALLOW_ALL, SILENT_COMMANDS, isAnyUnreliableCommand, isSedReadonlyForm, isSilentCommand, isSilentGo, isSilentNpx, isSilentTsc, looksLikeGitBlobToken, looksLikeRepoRelativePath } from "./silent.ts";
 import { COMMAND_TABLE, canExtractBareDir, readExtract, readExtractWithBareDir } from "./extractors.ts";
 
-export function extractBashTargets(rawCommand: string, projectRoot: string, env: NodeJS.ProcessEnv = process.env): ExtractResult {
+/**
+ * bash-c-literal-extract: 尝试对 shell 转发器 `-c` 字符串参数做**纯字面量递归提取**。
+ *
+ * 安全性质（核心）：精确化后权限判定 **≤ 直接执行该命令**——
+ * - 有目标时走与直接执行完全相同的路径决策；
+ * - 0 目标 / 内层不可靠 → 返回 undefined（调用方回退 `shell_forwarder` 弹窗，更严）。
+ *
+ * 深度上限：允许最深 **1 层** `-c` 递归（顶层命令 depth 0 → `-c` 内层 depth 1）。
+ * 内层命令若本身仍是 `bash -c ...`，递归进来时 depth ≥ 1 → 直接返回 undefined
+ * （回退弹窗），防 `bash -c "bash -c ..."` 无限嵌套。
+ *
+ * **外层形态限制（防丢目标安全洞）**：仅当外层命令是**单 fragment 单 pipeline
+ * stage** 时才递归。复合（`bash -c "..." && rm y`）或管道（`bash -c "..." | head`）
+ * 外层形态下，只提取 `-c` 内层目标会**丢掉外层其余 stage 的目标**（如 `rm y` 的
+ * 写目标）→ 安全洞。故对非单 stage 外层形态保守回退 `shell_forwarder`（与现状
+ * 一致），不精确化。内层命令本身可含复合/管道（递归时由 `extractBashTargets`
+ * 的 splitCommands/splitPipelines 正常处理，目标不丢）。
+ *
+ * 返回 undefined 表示"不可纯字面量精确化"（调用方回退 `shell_forwarder`）。
+ */
+function tryExtractLiteralShellC(
+  rawCommand: string,
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  depth: number,
+): ExtractResult | undefined {
+  // 深度上限：内层命令（depth ≥ 1）本身是 `-c` 时不再递归
+  if (depth >= 1) return undefined;
+  // 外层形态限制：单 fragment 单 stage 才递归（防丢外层其余 stage 目标）
+  const fragments = splitCommands(rawCommand);
+  if (fragments.length !== 1) return undefined;
+  const stages = splitPipelines(fragments[0]);
+  if (stages.length !== 1) return undefined;
+  const tokens = tokenize(stages[0].trim());
+  const cArg = extractShellCArg(tokens);
+  if (cArg === undefined) return undefined; // 非 `-c` 形态（脚本路径 / source / stdin 重定向）
+  if (!isPureLiteralShellArg(cArg)) return undefined; // 非纯字面量（含 $ / 反引号 / 控制流 / glob / brace / 换行）
+  // 递归解析内层字符串（depth+1；内层提取会重跑全套守卫做纵深防御）
+  const innerResult = extractBashTargets(cArg, projectRoot, env, depth + 1);
+  if (!innerResult.reliable) return undefined; // 内层不可靠 → 回退弹窗
+  if (innerResult.targets.length === 0) return undefined; // 0 目标 → 回退弹窗（不更宽松）
+  return { reliable: true, targets: innerResult.targets };
+}
+
+export function extractBashTargets(
+  rawCommand: string,
+  projectRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+  // bash-c-literal-extract: 递归深度计数。公共调用方默认 depth=0（顶层命令）；
+  // 纯字面量 `-c` 递归时 depth=1（内层命令）。加宽兼容——不影响既有三参数调用。
+  depth: number = 0,
+): ExtractResult {
   // 0. `find` write flag guard: `find -delete` / `-exec` / `-execdir` /
   // `-ok` / `-okdir` at the leading position of any command fragment is a
   // write operation. Runs FIRST so its reason takes precedence over
@@ -58,6 +109,13 @@ export function extractBashTargets(rawCommand: string, projectRoot: string, env:
   // argument, which our tokenizer cannot see through. Runs BEFORE pipeline
   // splitting so `bash -c "cmd" | head` still triggers.
   if (isShellForwarder(rawCommand)) {
+    // bash-c-literal-extract: pure-literal `-c` string args are recursively
+    // extracted instead of blanket-unreliable. This tightens the decision (no
+    // persistable "always allow" grant on the raw command → closes the
+    // sensitive-hard-line bypass) while never loosening it (0-target / inner
+    // unreliable → fall back to shell_forwarder below).
+    const literal = tryExtractLiteralShellC(rawCommand, projectRoot, env, depth);
+    if (literal) return literal;
     return { reliable: false, rawCommand, reason: "shell_forwarder" };
   }
 

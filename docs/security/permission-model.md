@@ -70,10 +70,11 @@
    - **为什么存在**：forwarder 的 downstream 是运行时展开的——`xargs` 接收上游管道输出作为参数，无法静态确定。系统检查 forwarder 的第一阶段是否为写操作（`isForwarderStageSafe`），但 downstream 的语义分析超出静态分析能力。
    - **如何验证**：`find . | xargs rm`（弹窗，reason=forwarding_command）vs `cat file.txt | xargs wc -l`（弹窗，reason=forwarding_command）。`grep -n "forwarding_command\|isForwarderStageSafe" src/lib/bash-extract.ts`。
 
-3. **bash grant 扫裸路径 token 的局限性**
+3. **bash grant 扫裸路径 token 的局限性（纯字面量子集已可提取）**
    - **是什么**：`bash -c "cat /etc/passwd"` 中，`/etc/passwd` 在 bash -c 的字符串参数内，不在 bash 命令的顶层 token 中。系统无法穿透 shell forwarder 的字符串参数提取路径。
-   - **为什么存在**：bash forwarder（`bash -c`、`sh -c`）的字符串参数是运行时展开的——其中的路径、变量、命令替换都不可静态分析。系统标记整个 forwarder 为"不可靠"（reason=shell_forwarder），走弹窗，但不提取内部路径。
-   - **如何验证**：`bash -c "cat /etc/passwd"`（弹窗，reason=shell_forwarder，targets=[]）vs `cat /etc/passwd`（弹窗，targets=[read /etc/passwd]）。`grep -n "shell_forwarder" src/lib/bash-extract.ts`。
+   - **纯字面量子集除外（bash-c-literal-extract）**：当 `-c` 字符串参数可证明为**纯字面量**（不含 `$`、反引号、控制流关键字、glob/brace expansion、换行，且外层是单 fragment 单 stage 形态）时，系统递归解析该字符串并**精确提取目标**——`bash -c "cat ~/.ssh/id_rsa"` 提取 read 目标交决策层（敏感文件 → 两档弹窗，**不可持久化**），不再落入三档可持久化 shell_forwarder 通道。这堵住了"不可靠 bash 可持久化授权绕过敏感硬底线"的通道。安全性质：精确化后权限判定 **≤ 直接执行该命令**（有目标走与直接执行同路径决策；0 目标 / 内层不可靠 / 嵌套 `-c` 一律回退 shell_forwarder 弹窗，更严）。
+   - **为什么存在**：非纯字面量字符串参数（含 `$VAR`、`$(...)`、控制流、glob）是运行时展开的，不可静态分析——系统对这些保持 shell_forwarder"不可靠"，走弹窗但不提取内部路径。
+   - **如何验证**：`bash -c "cat /etc/passwd"`（可靠，targets=[read /etc/passwd]，与直接执行同判定）vs `bash -c "cat $MYSECRETS"`（弹窗，reason=shell_forwarder，不提取）。`grep -n "isPureLiteralShellArg\\|tryExtractLiteralShellC" src/lib/bash-extract/`。
 
 4. **heredoc 内容不可分析**
    - **是什么**：未引号定界的 heredoc（`<<EOF`）内容被视为不可靠——内容中的路径、变量、命令替换都不可静态确定。引号定界 heredoc（`<<'EOF'`）被视为字面数据，内容不可靠但命令本身可提取。

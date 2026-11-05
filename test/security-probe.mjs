@@ -78,14 +78,18 @@ const PAYLOADS = [
 
   // ===== bash-hardening-round-2 =====
   //
-  // Class L1: shell forwarder with long-option prefix before -c. The current
-  // isShellForwarderTokenStream breaks the scan on any `--...` arg, so the
-  // following `-c` is never seen and the command slips through as a silent
-  // pass. These payloads must be classified shell_forwarder.
-  ["L1_bash_posix_c", "bash --posix -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L1_bash_norc_c", "bash --norc -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L1_bash_noprofile_c", "bash --noprofile -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L1_sh_posix_c", "sh --posix -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  // Class L1: shell forwarder with long-option prefix before -c. The original
+  // bypass was: isShellForwarderTokenStream broke the scan on any `--...` arg,
+  // so the following `-c` was never seen and the command slipped through as a
+  // silent pass. The L1 fix (`continue` on `--` flags) catches it. With
+  // bash-c-literal-extract, the pure-literal `-c` arg `rm -rf /` is now
+  // precisely extracted to `delete /` (routed through decideTarget → tier=two
+  // prompt, never persistable) — still intercepted, never a silent pass, and
+  // never more permissive than direct execution of `rm -rf /`.
+  ["L1_bash_posix_c", "bash --posix -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L1_bash_norc_c", "bash --norc -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L1_bash_noprofile_c", "bash --noprofile -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L1_sh_posix_c", "sh --posix -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
   // L1 negative: `bash --version` and `bash --help` print metadata; they are
   // NOT forwarders. Even after the L1 fix (`continue` on `--` flags), no
   // positional arg or `-c` follows, so the scan falls off and returns false.
@@ -94,15 +98,17 @@ const PAYLOADS = [
 
   // Class L2: outer wrapper prefixing a shell forwarder. `sudo`/`nohup`/
   // `timeout`/`watch`/`nice` change process context without altering the
-  // inner command, but the current SHELL_WRAPPER_NAMES only covers `env`/
-  // `command`, so `sudo bash -c '...'` slips through as a silent pass.
-  ["L2_sudo_bash_c", "sudo bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  // inner command. With bash-c-literal-extract, pure-literal `-c 'rm -rf /'`
+  // payloads are precisely extracted to `delete /` (intercepted via
+  // decideTarget → tier=two prompt, never persistable); script-path payloads
+  // (`bash /tmp/evil.sh`) stay shell_forwarder (not `-c`, content from file).
+  ["L2_sudo_bash_c", "sudo bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
   ["L2_nohup_bash_script", "nohup bash /tmp/evil.sh", { reliable: false, reason: "shell_forwarder" }],
-  ["L2_timeout_5_bash_c", "timeout 5 bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L2_timeout_1m_bash_c", "timeout 1m bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L2_watch_bash_c", "watch bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L2_nice_n10_bash_c", "nice -n 10 bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
-  ["L2_sudo_env_bash_c", "sudo env PATH=/usr/bin bash -c 'rm -rf /'", { reliable: false, reason: "shell_forwarder" }],
+  ["L2_timeout_5_bash_c", "timeout 5 bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L2_timeout_1m_bash_c", "timeout 1m bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L2_watch_bash_c", "watch bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L2_nice_n10_bash_c", "nice -n 10 bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
+  ["L2_sudo_env_bash_c", "sudo env PATH=/usr/bin bash -c 'rm -rf /'", { reliable: true, hasDelete: "/" }],
 
   // Class L3: compound commands that use `cd` to change cwd. Static
   // analysis resolves relative paths against projectRoot, so `cd /etc &&
@@ -140,10 +146,15 @@ for (const [label, cmd, expected] of PAYLOADS) {
     actual = result.reliable ? `OK targets=${result.targets.length}` : `UNRL[${result.reason}]`;
   } else {
     // Expect reliable. Verify write target (if any), read target (if any),
-    // or multi-read targets.
+    // delete target (if any), or multi-read targets.
     ok = result.reliable === true;
     if (expected.hasWrite) {
       ok = ok && result.targets.some((t) => t.action === "write" && t.path === expected.hasWrite);
+    }
+    if (expected.hasDelete) {
+      // bash-c-literal-extract: `rm` extracts a `delete` action (not write/read),
+      // so the L1/L2 pure-literal `-c` payloads assert hasDelete for precision.
+      ok = ok && result.targets.some((t) => t.action === "delete" && t.path === expected.hasDelete);
     }
     if (expected.hasRead) {
       ok = ok && result.targets.some((t) => t.action === "read" && t.path === expected.hasRead);

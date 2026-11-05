@@ -2,6 +2,7 @@
 // Pure module — no IO / no side effects.
 
 import { splitCommands, splitPipelines, tokenize, looksLikePath, isAmpBackgroundSeparator } from "./parse.ts";
+import { CONTROL_FLOW_KEYWORDS } from "./control-flow.ts";
 import { isReadOnlyWithArgs, isDevSocketOrFd } from "./readonly.ts";
 import { COMMAND_TABLE, FIND_NONPATH_FLAG_ARGS, canExtractBareDir, grepPatternSkipIdx } from "./extractors.ts";
 import { GIT_READONLY_SUBCOMMANDS } from "./git-cmds.ts";
@@ -1084,3 +1085,84 @@ export function scanCdChdir(cmd: string): string | undefined {
 }
 
 // -------- Main extraction --------
+
+// -------- bash-c-literal-extract: 纯字面量护栏判定 --------
+
+/**
+ * 判定 shell 转发器 `-c` 后的字符串参数是否为**纯字面量**（保守充分条件）。
+ *
+ * 输入是 `tokenize` 归一化后的参数串（引号已剥）。返回 true 当且仅当字符串不含：
+ * - `$`（覆盖 `$VAR` / `$(...)` / `$((...))` 统一拦截）
+ * - 反引号
+ * - 控制流关键字（while/for/if/case/until/do/done 等，词边界匹配）
+ * - 未引号 glob 元字符 `* ? [ { }`（`{ }` 覆盖 brace expansion）
+ * - 换行（heredoc / 多行命令不可静态确定）
+ *
+ * 这是**充分条件**而非必要条件——不含上述构造即可静态确定。安全方向保守：
+ * 任一构造出现即返回 false（外层调用方回退 shell_forwarder 弹窗）。
+ * 相邻引号拼接（`"c""at x"`）在 tokenize 阶段已合并为 `cat x`，此处自然判纯字面量，
+ * 与 bash 拼接语义一致。
+ */
+export function isPureLiteralShellArg(s: string): boolean {
+  if (s.length === 0) return false;
+  // 动态性构造：$（变量/命令替换/算术）与反引号（命令替换）统一拦截
+  if (s.includes("$") || s.includes("`")) return false;
+  // 多行 / heredoc 不可静态确定
+  if (s.includes("\n")) return false;
+  // 未引号 glob + brace expansion（剥引号后所有 glob 字符都视为待展开）
+  if (/[*?[{]/.test(s) || s.includes("}")) return false;
+  // 控制流关键字：按空白拆词后逐词匹配（词边界语义）
+  const words = s.split(/\s+/);
+  for (const w of words) {
+    if (CONTROL_FLOW_KEYWORDS.has(w)) return false;
+  }
+  return true;
+}
+
+/**
+ * 从单个 pipeline stage 的 token 流中提取 shell 转发器 `-c` 后的字符串参数。
+ *
+ * 与 `isShellForwarderTokenStream` 共用同一套 token 扫描语义（SHELL_WRAPPER_NAMES
+ * 包装器跳过、SHELL_NAMES 识别、`-c` / `-xc` 簇 / 长 flag 跳过），但返回的是
+ * **`-c` 后的那个字符串 token**（供调用方递归解析），而非布尔值。
+ *
+ * 返回 undefined 当：
+ * - stage 不是 shell 转发器（无 shell 名 / 无 `-c`）
+ * - 是转发器但**不是 `-c` 形态**（如 `bash /tmp/x.sh` 脚本路径、`source x`、
+ *   `bash < file`）——这些的执行内容来自文件而非字符串参数，不可静态展开
+ * - `-c` 后无 token
+ */
+export function extractShellCArg(tokens: string[]): string | undefined {
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    const base = tok.split("/").pop()!;
+    if (SHELL_WRAPPER_NAMES.has(base)) {
+      i = skipWrapperTokens(tokens, i + 1, base);
+      continue;
+    }
+    if (SHELL_NAMES.has(base)) {
+      for (let j = i + 1; j < tokens.length; j++) {
+        const arg = tokens[j];
+        // `-c` 独立 token：其后一个 token 就是命令字符串
+        if (arg === "-c") {
+          const next = tokens[j + 1];
+          return next && next.length > 0 ? next : undefined;
+        }
+        // 选项簇（-xc / -lc / -xec）：`c` 后面的下一个 token 是命令字符串
+        if (/^-[A-Za-z]*c/.test(arg)) {
+          const next = tokens[j + 1];
+          return next && next.length > 0 ? next : undefined;
+        }
+        // 长 flag 跳过继续找 -c
+        if (arg.startsWith("--")) continue;
+        // 非 flag 位置参数 = 脚本路径，非 `-c` 形态 → 不可静态展开
+        if (arg && !arg.startsWith("-")) return undefined;
+      }
+      return undefined;
+    }
+    if (base === "source" || base === ".") return undefined;
+    return undefined;
+  }
+  return undefined;
+}

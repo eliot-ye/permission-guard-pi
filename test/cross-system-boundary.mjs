@@ -37,13 +37,18 @@ let failures = 0;
   if (!ok) failures += 1;
 }
 
-// Boundary 2: `sudo bash --posix -c 'rm -rf /'` should be shell_forwarder
-// (L1 long-option + L2 sudo wrapper combined — neither should mask the other).
+// Boundary 2: `sudo bash --posix -c 'rm -rf /'` (L1 long-option + L2 sudo
+// wrapper combined — neither masks the other). The original bypass was that
+// either L1 (`--posix`) or L2 (`sudo`) masked the `-c`. With
+// bash-c-literal-extract, the pure-literal `-c 'rm -rf /'` arg is precisely
+// extracted to `delete /` — intercepted via decideTarget → tier=two prompt
+// (never persistable), still never a silent pass, never more permissive than
+// direct execution of `rm -rf /`.
 {
   const r = extractBashTargets("sudo bash --posix -c 'rm -rf /'", ROOT);
-  const ok = check("7.1b: sudo bash --posix -c '...' → shell_forwarder (L1+L2 combined)",
-    { reliable: r.reliable, reason: r.reliable ? null : r.reason },
-    { reliable: false, reason: "shell_forwarder" });
+  const ok = check("7.1b: sudo bash --posix -c '...' → delete / extracted (L1+L2 combined)",
+    { reliable: r.reliable, hasDelete: r.reliable ? r.targets.some((t) => t.action === "delete" && t.path === "/") : false },
+    { reliable: true, hasDelete: true });
   if (!ok) failures += 1;
 }
 
