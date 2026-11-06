@@ -130,21 +130,21 @@
   - 风险：medium（漏核对会导致 Change B 式 P1 缺陷）
   - 核对清单（对每个扩展点逐一核对）：
     - **`tsc`**：
-      - [ ] `isSilentCommand` 里 `tsc` 特例路径的入口判定（首个非-flag token ∈ `{--noEmit, --version, --help, -h}`）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里允许 flag 白名单（`isSafeTscFlag` 判定）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里拒绝 flag 名单（`--outDir` / `--emitDeclarationOnly` / `--noCheck` / `--build` / `-b` 等）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"不允许非-flag positional"规则与 step 4b 里一致
+      - [x] `isSilentCommand` 里 `tsc` 特例路径的入口判定（首个非-flag token ∈ `{--noEmit, --version, --help, -h}`）与 step 4b 里一致
+      - [x] `isSilentCommand` 里允许 flag 白名单（`isSafeTscFlag` 判定）与 step 4b 里一致
+      - [x] `isSilentCommand` 里拒绝 flag 名单（`--outDir` / `--emitDeclarationOnly` / `--noCheck` / `--build` / `-b` 等）与 step 4b 里一致
+      - [x] `isSilentCommand` 里"不允许非-flag positional"规则与 step 4b 里一致
     - **`go vet` / `go fmt`**：
-      - [ ] `isSilentCommand` 里 Mode 3 post-subcommand 的 `GO_SILENT_POSITIONAL_SUBCOMMANDS.has(subcommandSeen)` gate 与 step 4b 里一致
-      - [ ] `isSilentCommand` 里 `looksLikeRepoRelativePath` 判定与 step 4b 里一致
-      - [ ] `isSilentCommand` 里 `go vet` / `go fmt` 的 flag 白名单（`-copylocks`/`-shadow`/`-l`/`-w`/`-r <pattern>`/`-s` 等）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"flag 必须在 positional 之前"规则与 step 4b 里一致
+      - [x] `isSilentCommand` 里 Mode 3 post-subcommand 的 `GO_SILENT_POSITIONAL_SUBCOMMANDS.has(subcommandSeen)` gate 与 step 4b 里一致
+      - [x] `isSilentCommand` 里 `looksLikeRepoRelativePath` 判定与 step 4b 里一致
+      - [x] `isSilentCommand` 里 `go vet` / `go fmt` 的 flag 白名单（`-copylocks`/`-shadow`/`-l`/`-w`/`-r <pattern>`/`-s` 等）与 step 4b 里一致
+      - [x] `isSilentCommand` 里"flag 必须在 positional 之前"规则与 step 4b 里一致
     - **`npx`**：
-      - [ ] `isSilentCommand` 里 `npx` 特例路径的 `--no-install` 检测逻辑与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"允许 flag 白名单"（`--color`/`--cache`/`--yes`/`-y`/`--loglevel` 等）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"拒绝 flag 名单"（`--prefix`/`--package`/`--call`/`-c`）与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"`--no-install` 之后恰好一个非-flag positional"规则与 step 4b 里一致
-      - [ ] `isSilentCommand` 里"无更多 token"约束与 step 4b 里一致
+      - [x] `isSilentCommand` 里 `npx` 特例路径的 `--no-install` 检测逻辑与 step 4b 里一致
+      - [x] `isSilentCommand` 里"允许 flag 白名单"（`--color`/`--cache`/`--yes`/`-y`/`--loglevel` 等）与 step 4b 里一致
+      - [x] `isSilentCommand` 里"拒绝 flag 名单"（`--prefix`/`--package`/`--call`/`-c`）与 step 4b 里一致
+      - [x] `isSilentCommand` 里"`--no-install` 之后恰好一个非-flag positional"规则与 step 4b 里一致
+      - [x] `isSilentCommand` 里"无更多 token"约束与 step 4b 里一致
   - 验证：全部核对项勾选完毕；若发现任一分叉，在本 task 修复后再勾选
   - 分系统影响：side-effects.bash-extract（tier-small）
   - 依赖：T2.3、T3.3、T4.2
@@ -212,3 +212,7 @@
 **Verdict 锚点**：APPROVED（无 critical；4 条 warning 均为已知取舍或统计口径问题，不阻塞 apply）
 
 **reviewed-by**: subagent（architect 角色，fresh-context 隔离）
+
+---
+
+> **2026-11-06 system-audit project 文档状态对齐（用户授权 (i')）**：本 change 2026-10-20 归档时早于 td-archive 引入的「勾选后归档」机制，工作已交付但 tasks.md 复选框未勾。system-audit 逐项核实（代码符号 + 测试组 + commit `445aa8b` + security-probe 55/55 + 声称测试组 25/25 全通过）确认全部落地，据证据勾全。属文档状态对齐，非事后补做。

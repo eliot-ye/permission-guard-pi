@@ -18,14 +18,14 @@
 
 ## 1. 审计日志：TDD 测试先行（RED）
 
-- [ ] T1.1 新增 `test/audit-permissions.test.ts`，实现 6 条 🔴 测试断言（ALP1-ALP6），跑 `npm test -- test/audit-permissions.test.ts` 确认全部失败（预期 RED 状态：现有 `createAuditLogger` 不支持权限收敛与截断）
+- [x] T1.1 新增 `test/audit-permissions.test.ts`，实现 6 条 🔴 测试断言（ALP1-ALP6），跑 `npm test -- test/audit-permissions.test.ts` 确认全部失败（预期 RED 状态：现有 `createAuditLogger` 不支持权限收敛与截断）
   - 文件：`test/audit-permissions.test.ts`（新建）
   - 风险：medium（新测试面，需保证与既有 audit 测试独立可跑）
   - 验证：`npm test -- test/audit-permissions.test.ts 2>&1 | tail -20` 输出中 6 条测试均以 `✖` 失败；错误信息包含 `Expected ... mode to be 0o600` / `Expected note to contain 'command truncated'` 等断言失败文本
   - 分系统影响：side-effects.audit（tier-small）—— 仅测试面
   - 依赖：无
 
-- [ ] T1.2 补 3 条 trusted.json 权限断言（GMP1-GMP3）到 `test/trust.test.ts`，跑 `npm test -- test/trust.test.ts` 确认新增 3 条 🔴 失败、既有 GM1-GM10 仍全绿
+- [x] T1.2 补 3 条 trusted.json 权限断言（GMP1-GMP3）到 `test/trust.test.ts`，跑 `npm test -- test/trust.test.ts` 确认新增 3 条 🔴 失败、既有 GM1-GM10 仍全绿
   - 文件：`test/trust.test.ts`
   - 风险：low（追加，不改既有测试）
   - 验证：`npm test -- test/trust.test.ts 2>&1 | grep -E "^(✔|✖|ℹ)" | wc -l` 输出 ≥ 20 且失败行仅来自 GMP1/GMP2/GMP3 三条
@@ -34,14 +34,14 @@
 
 ## 2. 审计日志：实现权限收敛与截断（GREEN）
 
-- [ ] T2.1 修改 `src/lib/audit.ts`：在 `append` 闭包内、`appendFile` 之前插入 `fs.stat + 属主检查 + fs.chmod(logPath, 0o600)`；`fs.mkdir` 补 `{ mode: 0o700, recursive: true }`；chmod 与 stat 全部包在 try/catch 内，异常时 `failures.push(err)` 但不阻塞 append
+- [x] T2.1 修改 `src/lib/audit.ts`：在 `append` 闭包内、`appendFile` 之前插入 `fs.stat + 属主检查 + fs.chmod(logPath, 0o600)`；`fs.mkdir` 补 `{ mode: 0o700, recursive: true }`；chmod 与 stat 全部包在 try/catch 内，异常时 `failures.push(err)` 但不阻塞 append
   - 文件：`src/lib/audit.ts`
   - 风险：high（跨公共契约的行为变更；触及 fire-and-forget 语义）
   - 验证：`npm test -- test/audit.test.ts 2>&1 | tail -5` 输出 `# pass 8 # fail 0`（既有 8 条 AL 测试仍全绿）
   - 分系统影响：side-effects.audit（tier-small）
   - 依赖：T1.1
 
-- [ ] T2.2 修改 `src/lib/audit.ts`：在 `append` 闭包内实现 `command` 字段截断（>512 字符时截到 511 + `…`，`note` 追加 `; command truncated`）
+- [x] T2.2 修改 `src/lib/audit.ts`：在 `append` 闭包内实现 `command` 字段截断（>512 字符时截到 511 + `…`，`note` 追加 `; command truncated`）
   - 文件：`src/lib/audit.ts`
   - 风险：medium（新增字段语义，向后兼容）
   - 验证：`npm test -- test/audit-permissions.test.ts 2>&1 | tail -20` 中 ALP1-ALP6 全部 `✔` 通过；`npm test -- test/audit.test.ts 2>&1 | tail -5` 仍 `# pass 8 # fail 0`
@@ -50,7 +50,7 @@
 
 ## 3. trusted.json：实现权限收敛
 
-- [ ] T3.1 修改 `src/lib/trust.ts`：`createTrustStore` 中 `fs.mkdir(dirname(trustedFilePath), { recursive: true, mode: 0o700 })`；`atomicWrite` 在 `fs.rename` 成功后 `fs.stat + 属主检查 + fs.chmod(target, 0o600)`，异常时不阻塞写入但抛给调用方（沿用现有 `addPersistentGrant` 的 catch → session 降级路径）
+- [x] T3.1 修改 `src/lib/trust.ts`：`createTrustStore` 中 `fs.mkdir(dirname(trustedFilePath), { recursive: true, mode: 0o700 })`；`atomicWrite` 在 `fs.rename` 成功后 `fs.stat + 属主检查 + fs.chmod(target, 0o600)`，异常时不阻塞写入但抛给调用方（沿用现有 `addPersistentGrant` 的 catch → session 降级路径）
   - 文件：`src/lib/trust.ts`
   - 风险：high（跨公共契约；触及原子写入路径）
   - 验证：`npm test -- test/trust.test.ts 2>&1 | tail -5` 输出 `# pass 13 # fail 0`（既有 GM1-GM10 + 新增 GMP1-GMP3 全绿）
@@ -59,14 +59,14 @@
 
 ## 4. bash-extract：cargo 集合冲突修复
 
-- [ ] T4.1 补 7 条 BT-CARGO-* 回归测试到 `test/bash-extract.test.ts`（BT-CARGO-1 到 BT-CARGO-7，见 proposal 覆盖账本），跑 `npm test -- test/bash-extract.test.ts` 确认 BT-CARGO-1（cargo check）与 BT-CARGO-2（cargo metadata）失败，其余 5 条通过
+- [x] T4.1 补 7 条 BT-CARGO-* 回归测试到 `test/bash-extract.test.ts`（BT-CARGO-1 到 BT-CARGO-7，见 proposal 覆盖账本），跑 `npm test -- test/bash-extract.test.ts` 确认 BT-CARGO-1（cargo check）与 BT-CARGO-2（cargo metadata）失败，其余 5 条通过
   - 文件：`test/bash-extract.test.ts`
   - 风险：low
   - 验证：`npm test -- test/bash-extract.test.ts 2>&1 | grep -E "^✖"` 输出恰为 `BT-CARGO-1` 与 `BT-CARGO-2` 两行；BT-CARGO-3 到 BT-CARGO-7 均为 `✔`
   - 分系统影响：side-effects.bash-extract（tier-small）
   - 依赖：无
 
-- [ ] T4.2 从 `src/lib/bash-extract.ts` 的 `UNRELIABLE_COMMANDS` 集合中移除 `"cargo"` 字面项（当前位于该 Set 的 `// Formerly-SILENT commands moved to UNRELIABLE` 注释下）；不动 `SILENT_COMMANDS.cargo`
+- [x] T4.2 从 `src/lib/bash-extract.ts` 的 `UNRELIABLE_COMMANDS` 集合中移除 `"cargo"` 字面项（当前位于该 Set 的 `// Formerly-SILENT commands moved to UNRELIABLE` 注释下）；不动 `SILENT_COMMANDS.cargo`
   - 文件：`src/lib/bash-extract.ts`（第 925-939 行区间的 Set 定义）
   - 风险：medium（改变 isAnyUnreliableCommand 对 cargo 前缀的返回值）
   - 验证：`npm test -- test/bash-extract.test.ts 2>&1 | tail -5` 输出 `# pass N # fail 0`（N = 既有测试数 + 7），BT-CARGO-1 与 BT-CARGO-2 由 `✖` 变 `✔`
@@ -75,49 +75,49 @@
 
 ## 5. 死代码与配置清理
 
-- [ ] T5.1a 删除 `extensions/index.ts` 中 `bashPermissionForReason` 的三个死 case（`"device_redirect"` / `"bounded_glob"` / `"unresolved_variable"`）与 `bashSubtitleForReason` 的 `"bounded_glob"` case
+- [x] T5.1a 删除 `extensions/index.ts` 中 `bashPermissionForReason` 的三个死 case（`"device_redirect"` / `"bounded_glob"` / `"unresolved_variable"`）与 `bashSubtitleForReason` 的 `"bounded_glob"` case
   - 文件：`extensions/index.ts`（第 166-169 行、205-206 行）
   - 风险：low（纯死分支删除）
   - 验证：`grep -c "device_redirect\|bounded_glob\|unresolved_variable" extensions/index.ts src/` 输出为 `0`
   - 分系统影响：extension-orchestration（tier-small）
   - 依赖：无
 
-- [ ] T5.1b 回写 baseline spec：`openspec/specs/approval-flow/spec.md`——删除 `device_redirect` 与 `bounded_glob` 两条副文本 scenario；修改"两档 vs 三档弹窗"requirement 的 bash_reason 列举，去掉 `device_redirect` / `bounded_glob` 两项
+- [x] T5.1b 回写 baseline spec：`openspec/specs/approval-flow/spec.md`——删除 `device_redirect` 与 `bounded_glob` 两条副文本 scenario；修改"两档 vs 三档弹窗"requirement 的 bash_reason 列举，去掉 `device_redirect` / `bounded_glob` 两项
   - 文件：`openspec/specs/approval-flow/spec.md`
   - 风险：medium（公共契约变更）
   - 验证：`grep -c "device_redirect\|bounded_glob" openspec/specs/approval-flow/` 输出为 `0`
   - 分系统影响：approval-flow（tier-medium）
   - 依赖：T5.1a
 
-- [ ] T5.1c 回写 baseline spec：`openspec/specs/grant-memory/spec.md`——删除"Bash 命令记忆渠道"requirement 授权类型映射中的 `device_redirect` / `bounded_glob` 条目；删除对应 benign scenario
+- [x] T5.1c 回写 baseline spec：`openspec/specs/grant-memory/spec.md`——删除"Bash 命令记忆渠道"requirement 授权类型映射中的 `device_redirect` / `bounded_glob` 条目；删除对应 benign scenario
   - 文件：`openspec/specs/grant-memory/spec.md`
   - 风险：medium（公共契约变更）
   - 验证：`grep -c "device_redirect\|bounded_glob" openspec/specs/grant-memory/` 输出为 `0`
   - 分系统影响：policy-core（tier-medium）
   - 依赖：T5.1a
 
-- [ ] T5.1d 更新 `test/trust.test.ts` 的测试数据：GM13 / GM15 / GM16 / GM17 / GM18 的 `addBashSessionGrant` / `addBashPersistentGrant` 参数值从 `device_redirect` 替换为 `glob_expansion`；同步替换 GM17 内的 `assert.equal(g.reason, "device_redirect")` 断言为 `assert.equal(g.reason, "glob_expansion")`
+- [x] T5.1d 更新 `test/trust.test.ts` 的测试数据：GM13 / GM15 / GM16 / GM17 / GM18 的 `addBashSessionGrant` / `addBashPersistentGrant` 参数值从 `device_redirect` 替换为 `glob_expansion`；同步替换 GM17 内的 `assert.equal(g.reason, "device_redirect")` 断言为 `assert.equal(g.reason, "glob_expansion")`
   - 文件：`test/trust.test.ts`
   - 风险：low（仅测试数据替换，断言逻辑不变）
   - 验证：`grep -c "device_redirect" test/trust.test.ts` 输出为 `0`；`npm test -- test/trust.test.ts 2>&1 | tail -5` 输出 `# fail 0`
   - 分系统影响：policy-core.trust（tier-medium）—— 测试面
   - 依赖：T5.1a、T5.1c
 
-- [ ] T5.1e 全局契约漂移校验：确认 baseline spec 与代码不再存在死契约残留
+- [x] T5.1e 全局契约漂移校验：确认 baseline spec 与代码不再存在死契约残留
   - 文件：无（验证动作）
   - 风险：low
   - 验证：`grep -c "device_redirect\|bounded_glob\|unresolved_variable" src/ extensions/ test/ openspec/specs/` 输出为 `0`；`npm test 2>&1 | tail -5` 输出 `# fail 0`
   - 分系统影响：无
   - 依赖：T5.1a、T5.1b、T5.1c、T5.1d
 
-- [ ] T5.2 删除 `test/decision.test.ts` 中 `AD19: unreliable bash extraction (integration-covered placeholder)` 空转测试（第 428-430 行）
+- [x] T5.2 删除 `test/decision.test.ts` 中 `AD19: unreliable bash extraction (integration-covered placeholder)` 空转测试（第 428-430 行）
   - 文件：`test/decision.test.ts`
   - 风险：low（删除恒真断言）
   - 验证：`grep -c "integration-covered placeholder" test/decision.test.ts` 输出 `0`；`npm test -- test/decision.test.ts 2>&1 | tail -5` 输出 `# fail 0`（既有其他 AD 测试不受影响）
   - 分系统影响：测试基础设施
   - 依赖：无
 
-- [ ] T5.3 修改 `package.json` 的 `scripts.test` 字段：`node --experimental-strip-types --test test/**/*.test.ts extensions/**/*.test.ts` → `node --experimental-strip-types --test "test/*.test.ts"`
+- [x] T5.3 修改 `package.json` 的 `scripts.test` 字段：`node --experimental-strip-types --test test/**/*.test.ts extensions/**/*.test.ts` → `node --experimental-strip-types --test "test/*.test.ts"`
   - 文件：`package.json`
   - 风险：low
   - 验证：`grep '"test":' package.json` 输出行不含 `extensions/**/*.test.ts` 且不含 `test/**/*.test.ts`；`npm test 2>&1 | tail -5` 输出 `# pass N # fail 0`（N = 既有测试总数 - 1，因为删了 1 条占位）
@@ -126,7 +126,7 @@
 
 ## 6. 全量回归
 
-- [ ] T6.1 跑 `npm test` 全量测试，确认 `# pass N # fail 0`（N = 448 - 1 占位 + 16 新增 = 463），无 flaky；同时跑 `node --experimental-strip-types test/security-probe.mjs` 确认 35/35 通过（该探针不受本 change 影响，仅验证 extractor 未被 T4.2 意外破坏）
+- [x] T6.1 跑 `npm test` 全量测试，确认 `# pass N # fail 0`（N = 448 - 1 占位 + 16 新增 = 463），无 flaky；同时跑 `node --experimental-strip-types test/security-probe.mjs` 确认 35/35 通过（该探针不受本 change 影响，仅验证 extractor 未被 T4.2 意外破坏）
   - 文件：无（验证动作）
   - 风险：medium（跨分系统回归）
   - 验证：`npm test 2>&1 | tail -5` 输出 `# pass 463 # fail 0`；`node --experimental-strip-types test/security-probe.mjs 2>&1 | tail -3` 输出 `35 passed, 0 failed out of 35`
@@ -135,7 +135,7 @@
 
 ## 7. 契约与规格完整性
 
-- [ ] T7.1 跑 `openspec validate permission-hardening-cleanup --type change --json` 确认无 structural 问题；跑 `openspec status --change permission-hardening-cleanup --json` 确认所有 applyRequires artifact 状态为 `done`
+- [x] T7.1 跑 `openspec validate permission-hardening-cleanup --type change --json` 确认无 structural 问题；跑 `openspec status --change permission-hardening-cleanup --json` 确认所有 applyRequires artifact 状态为 `done`
   - 文件：无（验证动作）
   - 风险：low
   - 验证：`openspec validate permission-hardening-cleanup --type change --json` 输出中 `issues` 数组为空或 `errors: []`；`openspec status --change permission-hardening-cleanup --json` 输出中每个 artifact `status === "done"`
@@ -144,7 +144,7 @@
 
 ## 8. 缓冲收尾（project buffer 35%）
 
-- [ ] T8.1 缓冲任务：若 T1-T6 中任一 task 出现非预期失败（如 chmod 在测试 tmpdir 上行为差异、Unicode `…` 序列化问题、属主检查在 CI 环境失败），此 task 承接修复；预计耗时 45 min 上限
+- [x] T8.1 缓冲任务：若 T1-T6 中任一 task 出现非预期失败（如 chmod 在测试 tmpdir 上行为差异、Unicode `…` 序列化问题、属主检查在 CI 环境失败），此 task 承接修复；预计耗时 45 min 上限
   - 文件：视情况而定（预期为空操作）
   - 风险：low
   - 验证：本 task 完成时 T6.1 的验证字段全部通过；若 T1-T6 已一次通过，则本 task 主体为空但打勾（记录"buffer 未被消耗"）
@@ -196,3 +196,7 @@ Code review (deep+verify) 发现 6 个 issues 后追加的修复任务。
   - 验证：`npm test 2>&1 | tail -5` 输出 `# pass 467 # fail 0`；`security-probe` 输出 `35 passed, 0 failed out of 35`
   - 分系统影响：全部子系统
   - 依赖：T10.1 到 T10.5
+
+---
+
+> **2026-11-06 system-audit project 文档状态对齐（用户授权 (i')）**：本 change 2026-10-20 归档时早于 td-archive 引入的「勾选后归档」机制，工作已交付但 tasks.md 复选框未勾。system-audit 逐项核实（代码符号 + 测试组 + commit `445aa8b` + security-probe 55/55 + 声称测试组 25/25 全通过）确认全部落地，据证据勾全。属文档状态对齐，非事后补做。

