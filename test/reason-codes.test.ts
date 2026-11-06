@@ -25,12 +25,12 @@ test("reason-codes: sensitive domain has exactly 7 codes", () => {
   assert.equal(SENSITIVE_REASON_CODES.length, 7);
 });
 
-test("reason-codes: bash domain has exactly 15 codes", () => {
-  assert.equal(BASH_REASON_CODES.length, 15);
+test("reason-codes: bash domain has exactly 16 codes", () => {
+  assert.equal(BASH_REASON_CODES.length, 16);
 });
 
-test("reason-codes: total is 35 across all 3 domains", () => {
-  assert.equal(ALL_REASON_CODES.length, 35);
+test("reason-codes: total is 36 across all 3 domains", () => {
+  assert.equal(ALL_REASON_CODES.length, 36);
 });
 
 test("reason-codes: every code is snake_case", () => {
@@ -96,7 +96,7 @@ test("reason-codes: sensitive domain covers all 7 rule codes", () => {
   assert.deepEqual([...SENSITIVE_REASON_CODES].sort(), [...expected].sort());
 });
 
-test("reason-codes: bash domain covers all 15 extractor codes", () => {
+test("reason-codes: bash domain covers all 16 extractor codes", () => {
   const expected = [
     "control_flow",
     "shell_forwarder",
@@ -113,6 +113,7 @@ test("reason-codes: bash domain covers all 15 extractor codes", () => {
     "unresolved_variable",
     "arithmetic",
     "unreliable_command",
+    "unterminated_redirect_quote",
   ];
   assert.deepEqual([...BASH_REASON_CODES].sort(), [...expected].sort());
 });

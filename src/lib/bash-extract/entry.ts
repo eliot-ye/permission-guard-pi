@@ -52,7 +52,29 @@ function tryExtractLiteralShellC(
   const innerResult = extractBashTargets(cArg, projectRoot, env, depth + 1);
   if (!innerResult.reliable) return undefined; // 内层不可靠 → 回退弹窗
   if (innerResult.targets.length === 0) return undefined; // 0 目标 → 回退弹窗（不更宽松）
-  return { reliable: true, targets: innerResult.targets };
+  // bash-extract-fail-closed-hardening D3: merge OUTER redirect targets. The
+  // inner extraction only sees the `-c` string; an outer redirect such as
+  // `bash -c "cat /tmp/input.txt" > /outside/output` was previously dropped
+  // (innerResult.targets returned as-is), leaking the outer write.
+  // IMPORTANT: only extract redirects OUTSIDE the `-c` argument. The `-c`
+  // string is a single token (`tokenize` keeps `cat /a > /b` whole), so any
+  // `>`/`>>` BEFORE or INSIDE it belongs to the inner command, NOT the outer.
+  // Running extractRedirects on the whole outer command would mis-capture the
+  // inner redirect (e.g. `bash -c "cat /a > /b"` would falsely extract `/b` as
+  // an outer write). Restrict to tokens AFTER the `-c` argument.
+  const cArgIndex = tokens.indexOf(cArg);
+  const outerTail = cArgIndex >= 0 ? tokens.slice(cArgIndex + 1).join(" ") : "";
+  const mergedTargets = [...innerResult.targets];
+  const outerRedirects: Array<{ action: ExtractAction; path: string }> = [];
+  if (outerTail && extractRedirects(outerTail, outerRedirects, projectRoot)) {
+    return undefined; // outer redirect unresolvable → fail-closed (fall back to prompt)
+  }
+  for (const t of outerRedirects) {
+    if (!mergedTargets.some((m) => m.action === t.action && m.path === t.path)) {
+      mergedTargets.push(t);
+    }
+  }
+  return { reliable: true, targets: mergedTargets };
 }
 
 export function extractBashTargets(
@@ -379,8 +401,14 @@ export function extractBashTargets(
       const trimmed = stage.trim();
       if (!trimmed) continue;
 
-      // Redirects.
-      extractRedirects(trimmed, targets, resolveBase);
+      // Redirects. bash-extract-fail-closed-hardening D2: `extractRedirects`
+      // returns true when it saw an unterminated-quote redirect target that
+      // cannot be statically resolved (e.g. `> "/outside/output`). Fail
+      // closed — the target might be an outside write, so degrade to
+      // unreliable instead of silently dropping the target.
+      if (extractRedirects(trimmed, targets, resolveBase)) {
+        return { reliable: false, rawCommand, reason: "unterminated_redirect_quote" };
+      }
 
       // Command-specific extractor or SILENT_COMMANDS.
       const tokens = tokenize(trimmed);

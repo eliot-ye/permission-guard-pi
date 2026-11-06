@@ -81,7 +81,8 @@ export type BashReasonCode =
   | "glob_expansion" // unquoted *, ?, [ metachars (non-bounded)
   | "unresolved_variable" // $VAR / ${VAR} not statically resolvable
   | "arithmetic" // $((...)) arithmetic expansion
-  | "unreliable_command"; // fallback when command form can't be analyzed
+  | "unreliable_command" // fallback when command form can't be analyzed
+  | "unterminated_redirect_quote"; // write-redirect target has unterminated quote (fail-closed)
 
 // Note: `unresolved_variable` corresponds to extractor reason strings
 // of the form `"unresolved variable: <var_name>"` — the variable name
@@ -176,6 +177,7 @@ export const BASH_REASON_CODES: readonly BashReasonCode[] = [
   "unresolved_variable",
   "arithmetic",
   "unreliable_command",
+  "unterminated_redirect_quote",
 ];
 
 export const ALL_REASON_CODES: readonly ReasonCode[] = [

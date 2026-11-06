@@ -89,6 +89,8 @@ const en: Bundle = {
     "Command uses $((...)) arithmetic expansion; result depends on runtime values. Select 'Allow for this session' to avoid repeat prompts",
   unreliable_command:
     "Command form cannot be reliably extracted for static analysis; review the full command. Select 'Allow for this session' to avoid repeat prompts",
+  unterminated_redirect_quote:
+    "Command contains a redirect target with an unterminated quote; cannot statically resolve the target. Select 'Allow for this session' to avoid repeat prompts",
 
   // UI codes (14)
   permission_request_title: "Permission request",
@@ -195,6 +197,8 @@ const zh: Bundle = {
     "该命令使用 $((...)) 算术扩展，结果取决于运行时值。选择「允许本会话」可避免重复弹窗",
   unreliable_command:
     "该命令形态无法通过静态分析可靠提取访问目标，请审阅整条命令。选择「允许本会话」可避免重复弹窗",
+  unterminated_redirect_quote:
+    "该命令含未闭合引号的重定向目标，无法静态解析目标路径。选择「允许本会话」可避免重复弹窗",
 
   // UI codes (14)
   permission_request_title: "权限请求",
@@ -272,4 +276,4 @@ export const EN_BUNDLE: Readonly<Bundle> = en;
 export const ZH_BUNDLE: Readonly<Bundle> = zh;
 
 // Total code count (all 3 domains + UI).
-export const TOTAL_CODE_COUNT = 57;
+export const TOTAL_CODE_COUNT = 58;

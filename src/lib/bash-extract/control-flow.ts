@@ -1,7 +1,7 @@
 // Bash extraction: control-flow keywords + for-loop exemptions + find write-flag.
 // Pure module — no IO / no side effects.
 
-import { splitCommands, tokenize } from "./parse.ts";
+import { splitCommands, splitPipelines, tokenize } from "./parse.ts";
 import { isBoundedPrefix, isFindReadOnly, isReadOnlyWithArgs } from "./readonly.ts";
 import { HARMLESS_BUILTINS, isForBodyReadOnly } from "./silent.ts";
 import { isSilentCommand } from "./silent.ts";
@@ -9,11 +9,20 @@ import { isSilentCommand } from "./silent.ts";
 export function scanFindWriteFlags(cmd: string): string | undefined {
   const fragments = splitCommands(cmd);
   for (const fragment of fragments) {
-    const tokens = tokenize(fragment.trim());
-    if (tokens.length === 0) continue;
-    const cmdName = tokens[0].split("/").pop()!;
-    if (cmdName === "find") {
-      if (!isFindReadOnly(tokens.slice(1))) return "find_write_flag";
+    // bash-extract-fail-closed-hardening D1: write-flag guard must align its
+    // decision unit with the extraction unit (pipeline stage). A `find
+    // -delete` in a NON-leading pipeline stage (e.g. `echo hi | find /x
+    // -delete`) was previously missed because `find` is not the first token
+    // of the fragment. Split each command fragment into stages by top-level
+    // `|` and inspect EVERY stage's leading command, not just the fragment's.
+    const stages = splitPipelines(fragment.trim());
+    for (const stage of stages) {
+      const tokens = tokenize(stage.trim());
+      if (tokens.length === 0) continue;
+      const cmdName = tokens[0].split("/").pop()!;
+      if (cmdName === "find") {
+        if (!isFindReadOnly(tokens.slice(1))) return "find_write_flag";
+      }
     }
   }
   return undefined;

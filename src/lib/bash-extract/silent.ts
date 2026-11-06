@@ -866,8 +866,12 @@ export function isSedReadonlyForm(rawCommand: string): boolean {
       }
       // 条件 4：无写重定向（`>`/`>>`/`2>`/`2>>` 等写文件重定向）。
       // 用 extractRedirects 收集写目标——命中写重定向即不豁免。
+      // bash-extract-fail-closed-hardening D2 (tasks 3.3): extractRedirects
+      // 现在返回 true 表示遇未闭合引号写重定向（如 `> "/outside/o`）。
+      // 此时写重定向未被可靠排除 → sed 只读豁免不成立（保守弹窗），
+      // 不可因目标无法解析而误判为「无写重定向」。
       const writeTargets: Array<{ action: ExtractAction; path: string }> = [];
-      extractRedirects(trimmed, writeTargets, "");
+      if (extractRedirects(trimmed, writeTargets, "")) return false;
       for (const t of writeTargets) {
         if (t.action === "write") return false;
       }
@@ -942,6 +946,52 @@ export function isForBodyReadOnly(
 
   for (const part of parts) {
     if (!part.trim()) continue;
+    // bash-extract-fail-closed-hardening D4: an assignment prefix followed by
+    // a command (`VAR=value cmd args`, e.g. `x=5 rm /outside/victim`) must NOT
+    // be exempted wholesale. The assignment `VAR=value` only binds the value;
+    // `cmd args` is the real command that still needs guarding. Previously
+    // `isAssignmentPart` matched `x=5 rm /outside/victim` as a pure-literal
+    // assignment (rhs `5 rm /outside/victim` has no special char) and returned
+    // true, letting `rm` escape the guard. Detect this form via tokenize: when
+    // the first token is a COMPLETE assignment (`VAR=...` with a closed RHS, no
+    // unterminated `$(`) and more tokens follow, strip the prefix and guard the
+    // remaining command tokens. A pure assignment (`VAR=value`, no following
+    // command) still falls through to `isAssignmentPart`.
+    const tokens = tokenize(part);
+    if (tokens.length > 1) {
+      // Strip a RUN of assignment prefixes (`x=5 y=6 cmd args`). Each prefix
+      // only binds a value; the trailing command still needs guarding. Keep
+      // iterating while the next token is itself a COMPLETE assignment, so a
+      // multi-prefix read-only command (`x=5 y=6 cat /a`) is not mistaken for
+      // a command named `y=6` (which would over-tighten → spurious prompt).
+      let cmdIndex = 0;
+      while (cmdIndex < tokens.length) {
+        const tok = tokens[cmdIndex];
+        const eq = tok.indexOf("=");
+        const isAssignmentForm = eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tok.slice(0, eq));
+        if (!isAssignmentForm) break;
+        const rhs = tok.slice(eq + 1);
+        // Complete assignment RHS: no `$(` at all, or a `$(` that is closed
+        // within the token. `n=$(grep` (unterminated `$(` split by tokenizer)
+        // is NOT a complete assignment — stop stripping, fall through.
+        const isCompleteAssignment = !rhs.includes("$(") || (rhs.startsWith("$(") && rhs.endsWith(")"));
+        if (!isCompleteAssignment) break;
+        cmdIndex += 1;
+      }
+      if (cmdIndex > 0 && cmdIndex < tokens.length) {
+        // Found assignment prefix(es) followed by a real command: guard it.
+        const rest = tokens.slice(cmdIndex);
+        const restCmdName = (rest[0] ?? "").split("/").pop() ?? "";
+        if (
+          !isReadOnlyWithArgs(restCmdName, rest.slice(1)) &&
+          !isSilentCommand(restCmdName, rest.slice(1)) &&
+          !HARMLESS_BUILTINS.has(restCmdName)
+        ) {
+          return false;
+        }
+        continue;
+      }
+    }
     // Assignment form: `VAR=...` (e.g. `n=$(grep -c ... "$f")`, `n=5`).
     // The whole part is one assignment — it is read-only when the RHS is a
     // pure literal, or a `$(...)` substitution that passes the for-body
@@ -949,13 +999,13 @@ export function isForBodyReadOnly(
     if (isAssignmentPart(part, forCtx ?? null, projectRoot ?? "")) {
       continue;
     }
-    const tokens = tokenize(part);
-    if (tokens.length === 0) continue;
-    const cmdName = tokens[0]?.split("/").pop() ?? "";
+    const tokens2 = tokenize(part);
+    if (tokens2.length === 0) continue;
+    const cmdName = tokens2[0]?.split("/").pop() ?? "";
     // `isReadOnlyWithArgs` gives `find` per-argument analysis (write flags
     // like `-delete`/`-exec` make the body non-read-only). Other commands
     // fall through to READ_ONLY_COMMANDS via isReadOnlyWithArgs.
-    if (!isReadOnlyWithArgs(cmdName, tokens.slice(1)) && !isSilentCommand(cmdName, tokens.slice(1)) && !HARMLESS_BUILTINS.has(cmdName)) {
+    if (!isReadOnlyWithArgs(cmdName, tokens2.slice(1)) && !isSilentCommand(cmdName, tokens2.slice(1)) && !HARMLESS_BUILTINS.has(cmdName)) {
       return false;
     }
   }

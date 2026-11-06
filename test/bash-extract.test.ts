@@ -5150,3 +5150,129 @@ test("BM-CD-MIXED-5: existing_pure_and_chain_cd_tracking_exempt_unchanged", () =
   assert.equal(r.reliable, true, `expected reliable (pure && exemption), got ${JSON.stringify(r)}`);
   assert.deepEqual(r.targets, []);
 });
+
+// -------- FCH: bash-extract-fail-closed-hardening 对抗回归用例 --------
+// 任务 1（TDD RED）：以下用例在当前 main 上应失败（RED），修复 D1-D4 后转 GREEN。
+// 命名前缀 FCH = Fail-Closed-Hardening。
+
+test("FCH-1: pipeline_find_delete_must_not_return_read_target", () => {
+  // 根因1：scanFindWriteFlags 只按 splitCommands 拆、不按 | 拆，管道内 find -delete 漏检。
+  // 应然：降级不可靠（write 被当 read 是绕过）。当前返回 reliable:true + read /outside/victim → RED。
+  const r = extractBashTargets("echo hi | find /outside/victim -delete", "/proj");
+  assert.equal(
+    r.reliable,
+    false,
+    `expected unreliable for pipeline find -delete, got ${JSON.stringify(r)}`
+  );
+  if (!r.reliable) assert.equal(r.reason, "find_write_flag");
+});
+
+test("FCH-2: quoted_redirect_target_must_be_extracted", () => {
+  // 根因2：extractRedirects 路径读取含引号字符 → looksLikePath 对 " 开头返回 false → 目标漏提。
+  // 应然：提取到写 target /outside/output。当前 reliable:true + targets:[] → RED。
+  const r = extractBashTargets('echo hi > "/outside/output"', "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(
+      r.targets.some((t) => t.path === "/outside/output" && t.action === "write"),
+      `expected write target /outside/output, got ${JSON.stringify(r.targets)}`
+    );
+  }
+});
+
+test("FCH-2b: single_quoted_redirect_target_must_be_extracted", () => {
+  const r = extractBashTargets("echo hi > '/outside/output'", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(
+      r.targets.some((t) => t.path === "/outside/output" && t.action === "write"),
+      `expected write target /outside/output, got ${JSON.stringify(r.targets)}`
+    );
+  }
+});
+
+test("FCH-3: bash_c_outer_redirect_target_must_be_merged", () => {
+  // 根因3：tryExtractLiteralShellC 提取内部目标后未合并外层 > file。
+  // 应然：提取到外层写 target /outside/output。当前 reliable:true + 仅 read /tmp/input.txt → RED。
+  const r = extractBashTargets('bash -c "cat /tmp/input.txt" > /outside/output', "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(
+      r.targets.some((t) => t.path === "/outside/output" && t.action === "write"),
+      `expected outer write target /outside/output, got ${JSON.stringify(r.targets)}`
+    );
+  }
+});
+
+test("FCH-4: for_assignment_prefix_rm_must_be_guarded", () => {
+  // 根因4：isAssignmentPart 把 x=5 rm ... 的 rhs（无特殊字符）判为赋值豁免，rm 逃逸守卫。
+  // 应然：提取到删除 target 或降级不可靠。当前 reliable:true + targets:[] → RED。
+  const r = extractBashTargets("for f in a; do x=5 rm /outside/victim; done", "/proj");
+  // `false as boolean`：避免 assert.equal 对字面量 false 做 TS 收窄（会把 r
+  // narrow 成 never，使下方 if (r.reliable) 分支无法访问 r.targets）。
+  assert.equal(
+    r.reliable,
+    false as boolean,
+    `expected unreliable for assignment-prefix rm, got ${JSON.stringify(r)}`
+  );
+  // 允许提取到 delete target 的替代形态：若 reliable:true 则必须含 delete /outside/victim。
+  if (r.reliable) {
+    assert.ok(
+      r.targets.some((t) => t.path === "/outside/victim" && t.action === "delete"),
+      `expected delete target /outside/victim, got ${JSON.stringify(r.targets)}`
+    );
+  }
+});
+
+// 任务 1.5 对照用例（应保持 GREEN——锁定真正只读命令免弹不回归）。
+test("FCH-5a: find_pipeline_readonly_stays_reliable", () => {
+  const r = extractBashTargets("find /etc | sort | head -5", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/etc" && t.action === "read"));
+  }
+});
+
+test("FCH-5b: all_readonly_stages_stay_reliable", () => {
+  const r = extractBashTargets("cat /a | grep x | sort", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/a" && t.action === "read"));
+  }
+});
+
+test("FCH-5c: for_readonly_loop_stays_reliable", () => {
+  const r = extractBashTargets("for f in a b; do cat $f; done", "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+});
+
+test("FCH-5d: bash_c_no_outer_redirect_stays_reliable", () => {
+  const r = extractBashTargets('bash -c "cat /tmp/input.txt"', "/proj");
+  assert.equal(r.reliable, true, `expected reliable, got ${JSON.stringify(r)}`);
+  if (r.reliable) {
+    assert.ok(r.targets.some((t) => t.path === "/tmp/input.txt" && t.action === "read"));
+  }
+});
+
+// 任务 3.2 / 3.3 边界：未闭合引号写重定向保守降级（D2）。
+test("FCH-6: unterminated_quote_redirect_degrades_unreliable", () => {
+  // 无闭引号 → 目标无法静态解析 → 降级不可靠，不得静默放行。
+  const r = extractBashTargets('echo hi > "/outside/output', "/proj");
+  assert.equal(
+    r.reliable,
+    false as boolean,
+    `expected unreliable for unterminated-quote redirect, got ${JSON.stringify(r)}`
+  );
+  if (!r.reliable) assert.equal(r.reason, "unterminated_redirect_quote");
+});
+
+test("FCH-6b: sed_exempt_not_applied_with_unterminated_quote_write_redirect", () => {
+  // 任务 3.3：sed 脚本本身只读，但外层写重定向目标未闭合引号 → sed 只读豁免
+  // 不成立（写重定向未被可靠排除），保守降级不可靠，不得误判为「无写重定向」。
+  const r = extractBashTargets("sed -n 's/a/b/' f > \"/outside/o", "/proj");
+  assert.equal(
+    r.reliable,
+    false as boolean,
+    `expected unreliable (sed exempt must not hold), got ${JSON.stringify(r)}`
+  );
+});

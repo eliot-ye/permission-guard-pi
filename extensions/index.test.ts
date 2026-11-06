@@ -2333,3 +2333,60 @@ test("AL-BR-5: legacy_audit_line_without_bash_reason_still_parses", async () => 
     );
   });
 });
+
+// -------- bash-extract-fail-closed-hardening D5: 多 target unread 硬拒先于 prompt --------
+// 契约来源：access-decision/spec.md「unread 权限语义」requirement（每 target deny_hard
+// 不可绕过）+ 根因：extensions/index.ts 原单循环在首个 prompt target 处 return，后续
+// target 的 unread 硬拒永不被判定。D5 两阶段后 unread 硬拒在 prompt 短路前触发。
+
+test("FCH-D5-1: multi_target_unread_hard_deny_precedes_prompt", async () => {
+  await withTmpDir(async (dir) => {
+    const globalDir = join(dir, "global");
+    await mkdir(globalDir, { recursive: true });
+    await (await import("node:fs/promises")).writeFile(
+      join(globalDir, "permission.json"),
+      // /etc/passwd 判 unread → 必须 deny_hard（不可绕过）。
+      JSON.stringify({ paths: { "/etc/passwd": "unread" } }),
+      "utf8",
+    );
+
+    // 第一个 target：/Users/x/.ssh/id_rsa（sensitive 未配置 → tier=two 会 prompt）。
+    // 第二个 target：/etc/passwd（unread → deny_hard）。
+    // 原缺陷：首 target prompt 短路，/etc/passwd 的 unread 永不被判定。
+    const command = "cat /Users/x/.ssh/id_rsa && cat /etc/passwd";
+    let promptCount = 0;
+    const { pi, ctx } = createMockPi({
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+      uiChoice: async (_p, choices) => {
+        promptCount++;
+        return choices[0];
+      },
+      projectRoot: "/proj",
+    });
+
+    registerPermissionGate(pi, {
+      trustedDir: dir,
+      configPaths: {
+        global: join(globalDir, "permission.json"),
+        project: join("/proj", ".pi/permission.json"),
+        local: join("/proj", ".pi/local/permission.json"),
+      },
+    });
+
+    const result = await fireToolCall(pi, ctx, {
+      toolName: "bash",
+      toolCallId: "tc-d5-1",
+      input: { command },
+    });
+
+    // unread 硬拒应先于首 target prompt 触发 → block。
+    assert.equal(result?.block, true, "multi-target command with unread should hard-deny");
+    // 关键断言：unread 硬拒短路时，首 target 的 prompt 不应被触发（阶段一先判 deny_hard）。
+    assert.equal(promptCount, 0, "unread hard_deny must precede the prompt target");
+  });
+});

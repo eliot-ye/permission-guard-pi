@@ -42,9 +42,9 @@ const UI_CODES = [
 
 const ALL_CODES = [...ALL_REASON_CODES, ...UI_CODES];
 
-test("i18n: total code count is 57", () => {
-  assert.equal(TOTAL_CODE_COUNT, 57);
-  assert.equal(ALL_CODES.length, 57);
+test("i18n: total code count is 58", () => {
+  assert.equal(TOTAL_CODE_COUNT, 58);
+  assert.equal(ALL_CODES.length, 58);
 });
 
 test("i18n: en bundle covers all 50 codes", () => {

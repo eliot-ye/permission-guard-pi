@@ -441,7 +441,15 @@ export function looksLikePath(token: string): boolean {
 
 // -------- Redirect extraction --------
 
-export function extractRedirects(command: string, targets: Array<{ action: ExtractAction; path: string }>, projectRoot: string) {
+export function extractRedirects(command: string, targets: Array<{ action: ExtractAction; path: string }>, projectRoot: string): boolean {
+  // bash-extract-fail-closed-hardening D2: return `true` when an
+  // unterminated-quote write-redirect target is detected (e.g.
+  // `> "/outside/output"` with no closing quote). The caller must treat
+  // this as a fail-closed signal (degrade to unreliable) because the
+  // target cannot be statically resolved. Previously such a target was
+  // silently dropped (quotes folded into `path` → `looksLikePath` false
+  // → `continue`), leaking the write.
+  let unterminatedQuoteRedirect = false;
   // Scan the command for redirect operators followed by a target path.
   // Operators we handle:
   //   writes: 2>> , 2> , >> , > , >& , 2>&1 (skip - refers to fd, not file)
@@ -501,9 +509,35 @@ export function extractRedirects(command: string, targets: Array<{ action: Extra
 
     // Read path token until whitespace or another special char.
     let path = "";
-    while (i < command.length && !/[\s;|>&<]/.test(command[i])) {
-      path += command[i];
+    // bash-extract-fail-closed-hardening D2: quote-aware path reading. A
+    // redirect target may be wrapped in single/double quotes (e.g.
+    // `> "/outside/output"`). The quote chars are shell syntax, not part of
+    // the path — strip them so `looksLikePath` sees the real path. If the
+    // quote is never closed, the target cannot be resolved → signal fail-closed.
+    const first = command[i];
+    if (first === '"' || first === "'") {
+      const quote = first;
       i += 1;
+      let closed = false;
+      while (i < command.length) {
+        if (command[i] === quote) {
+          closed = true;
+          i += 1;
+          break;
+        }
+        path += command[i];
+        i += 1;
+      }
+      if (!closed) {
+        // Unterminated quote in a redirect target: cannot resolve → fail-closed.
+        unterminatedQuoteRedirect = true;
+        continue;
+      }
+    } else {
+      while (i < command.length && !/[\s;|>&<]/.test(command[i])) {
+        path += command[i];
+        i += 1;
+      }
     }
 
     if (!path) continue;
@@ -530,6 +564,7 @@ export function extractRedirects(command: string, targets: Array<{ action: Extra
     void start; // (retained for clarity)
     void op;    // op records which operator; not used for downstream branching
   }
+  return unterminatedQuoteRedirect;
 }
 
 // -------- Command-specific extractors --------

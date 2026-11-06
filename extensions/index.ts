@@ -228,6 +228,11 @@ export function bashPermissionForReason(reason: string | undefined): "read_only"
     case "process_substitution_output":
     case "heredoc":
     case "subshell":
+    // bash-extract-fail-closed-hardening D2: an unterminated-quote redirect
+    // target cannot be resolved; the extractor degrades to unreliable with
+    // this reason. Treat as read_write (conservative, same as control_flow)
+    // so the downstream decision layer still gates it.
+    case "unterminated_redirect_quote":
       return "read_write";
     // bash-hardening-round-2 (L3): a compound command that includes `cd`
     // changes the cwd baseline for subsequent fragments, so the actual file
@@ -264,6 +269,7 @@ function bashReasonCodeAndParams(
     "find_write_flag", "command_substitution", "backtick_substitution",
     "process_substitution_input", "process_substitution_output", "heredoc",
     "subshell", "glob_expansion", "arithmetic", "unreliable_command",
+    "unterminated_redirect_quote",
   ] as const);
   if (codes.has(reason)) {
     return [reason as BashReasonCode, {}];
@@ -751,6 +757,16 @@ export function registerPermissionGate(
     // like `/proj/link -> /etc` would bypass outer-region checks by
     // appearing inside the project root.
     let autoAllowLogged = false;
+    // bash-extract-fail-closed-hardening D5: two-phase decision. The previous
+    // single loop returned on the FIRST prompt target (`handlePromptDecision`
+    // at :793), so a LATER target's unread hard-deny was never evaluated —
+    // violating the access-decision `unread` contract (every target MUST
+    // deny_hard non-bypassably). Phase 1: evaluate EVERY target's decision
+    // (including realpath alternative), collecting results; any deny_hard
+    // hard-denies immediately. Phase 2: replay the cached decisions in
+    // original order for prompt/auto_allow — no prompt can short-circuit a
+    // later unread hard-deny.
+    const decisions: Array<{ target: typeof extraction.targets[number]; resolvedPath: string; decision: Awaited<ReturnType<typeof decideTarget>> }> = [];
     for (const target of extraction.targets) {
       const resolvedPath = await tryRealpath(target.path);
       // Check both the target path and its realpath; take the stricter.
@@ -784,6 +800,11 @@ export function registerPermissionGate(
         });
         return { block: true, reason: decision.denial?.reason ?? "hard denied" };
       }
+      decisions.push({ target, resolvedPath, decision });
+    }
+    // Phase 2: replay in original order. No deny_hard remains (all were
+    // handled in phase 1), so only prompt / auto_allow paths execute here.
+    for (const { target, resolvedPath, decision } of decisions) {
       if (decision.kind === "prompt") {
         return handlePromptDecision(event, ctx, state, decision, resolvedPath, command, target.action);
       }
@@ -793,6 +814,10 @@ export function registerPermissionGate(
       // unconfigured non-sensitive default (in_project_default_allowed) is
       // the only exception. Record once per bash call to avoid duplicate
       // records for multi-target commands.
+      // Narrow for TS: phase 2 cannot contain deny_hard (all were returned in
+      // phase 1), but the union is `deny_hard | auto_allow` after the prompt
+      // early-return — assert auto_allow before reading its-only fields.
+      if (decision.kind !== "auto_allow") continue;
       if (!autoAllowLogged && decision.reasonCode !== "in_project_default_allowed") {
         state.audit.log({
           event: "auto_allow",
