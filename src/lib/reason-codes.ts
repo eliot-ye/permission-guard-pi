@@ -124,6 +124,8 @@ export type UiCode =
   // Sensitive tier=two subtitle
   | "subtitle_sensitive_hard_not_persistable"
   | "subtitle_network_exfil_not_persistable"
+  // config-self-protect (L2): permission.json write/delete tier=two subtitle
+  | "subtitle_config_write_not_persistable"
   // permission-toggle (P3): /permission command + footer status marker
   | "permission_status_enabled"
   | "permission_status_disabled"

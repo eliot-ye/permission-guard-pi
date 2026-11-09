@@ -57,7 +57,8 @@ export type Declaration =
   | "read_only"
   | "unread"
   | "sensitive_default"
-  | "unconfigured";
+  | "unconfigured"
+  | "config_write";
 
 import type { DecisionReasonCode } from "./reason-codes.ts";
 import type { SensitiveReasonCode } from "./reason-codes.ts";

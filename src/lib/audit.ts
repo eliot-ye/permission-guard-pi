@@ -48,7 +48,8 @@ export interface AuditRecord {
     | "read_only"
     | "unread"
     | "sensitive_default"
-    | "unconfigured";
+    | "unconfigured"
+    | "config_write";
   permission: "read_write" | "read_only" | null;
   toolCallId: string;
   note?: string;

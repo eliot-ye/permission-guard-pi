@@ -1199,3 +1199,330 @@ test("SYS-KP: 关键点等价变体跨分系统整合 auto-allow + audit 一致"
     },
   );
 });
+
+// ===== config-self-protect integration (L1 runtime-state + L2 config-write) =====
+
+function registerCpGate(
+  pi: any,
+  projectRoot: string,
+  trustedDir: string,
+): void {
+  registerPermissionGate(pi, {
+    trustedDir,
+    configPaths: {
+      global: join(trustedDir, "..", "global", "permission.json"),
+      project: join(projectRoot, ".pi", "permission.json"),
+      local: join(projectRoot, ".pi", "local", "permission.json"),
+    },
+  });
+}
+
+test("SYS-CP1: write trusted.json is hard-denied (L1 runtime-state, no prompt)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      let prompted = false;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompted = true;
+          return UI.allowOnce;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-cp-1",
+        input: { path: join(trustedDir, "trusted.json"), content: "{}" },
+      });
+      assert.equal(result?.block, true, "write trusted.json must block (deny_hard)");
+      assert.equal(prompted, false, "L1 deny_hard must not prompt");
+    },
+  );
+});
+
+test("SYS-CP2: write settings.json is hard-denied (L1 runtime-state)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-cp-2",
+        input: { path: join(trustedDir, "settings.json"), content: '{"enabled":false}' },
+      });
+      assert.equal(result?.block, true, "write settings.json must block (deny_hard)");
+    },
+  );
+});
+
+test("SYS-CP3: write project permission.json prompts tier=two without always-allow", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      let promptChoices: string[] = [];
+      let promptText = "";
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async (prompt: string, choices: string[]) => {
+          promptText = prompt;
+          promptChoices = choices;
+          return UI.deny;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-cp-3",
+        input: { path: join(projectRoot, ".pi/permission.json"), content: '{"**":"read_write"}' },
+      });
+      // A prompt decision surfaces via result (block:false) + audit; capture that it prompted.
+      assert.equal(promptChoices.length > 0, true, "config write must prompt");
+      assert.ok(
+        !promptChoices.includes(UI.alwaysAllow),
+        `config write must NOT offer always-allow, got: ${promptChoices.join(",")}`,
+      );
+      assert.ok(
+        !promptChoices.includes(UI.alwaysAllowCmd),
+        `config write must NOT offer always-allow-cmd, got: ${promptChoices.join(",")}`,
+      );
+      // config_write subtitle must be dispatched (approval-flow spec).
+      assert.ok(
+        promptText.includes("Permission config write cannot be persisted") ||
+          promptText.includes("权限配置写操作不可持久化"),
+        `config_write subtitle missing from prompt: ${promptText}`,
+      );
+      // Audit-log contract (side-effects): non-bash config_write → declaration
+      // config_write, grant_source default (not read_write/read_only).
+      await new Promise((r) => setTimeout(r, 100));
+      const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
+      const raw = await readFile(auditPath, "utf8").catch(() => "");
+      assert.ok(raw.includes('"declaration":"config_write"'), "audit declaration must be config_write");
+      assert.ok(raw.includes('"grant_source":"default"'), "non-bash config_write grant_source must be default");
+    },
+  );
+});
+
+test("SYS-CP4: config declaration read_write does not silence config-write prompt", async () => {
+  await withSandbox(
+    async (env: any) => {
+      await writeFile(
+        env.projectConfig,
+        JSON.stringify({ paths: { [env.projectConfig]: "read_write" } }),
+      );
+    },
+    async ({ projectRoot, trustedDir }) => {
+      let prompted = false;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompted = true;
+          return UI.deny;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-cp-4",
+        input: { path: join(projectRoot, ".pi/permission.json"), content: '{"**":"read_write"}' },
+      });
+      assert.equal(prompted, true, "config declaration must NOT silence config-write prompt");
+    },
+  );
+});
+
+test("SYS-CP5: read permission.json is not blocked (normal rules)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "read",
+        toolCallId: "tc-cp-5",
+        input: { path: join(projectRoot, ".pi/permission.json") },
+      });
+      // In-project non-sensitive read → auto_allow (not blocked).
+      assert.notEqual(result?.block, true, "read permission.json must NOT be blocked");
+    },
+  );
+});
+
+// ===== config-self-protect: bash branch coverage (D5 3-branch) =====
+
+test("SYS-CP6: reliable bash write to trusted.json is hard-denied (L1)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const cmd = `echo '{}' > ${join(trustedDir, "trusted.json")}`;
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-6",
+        input: { command: cmd },
+      });
+      assert.equal(result?.block, true, "reliable bash write to trusted.json must block (L1 deny_hard)");
+    },
+  );
+});
+
+test("SYS-CP7: unreliable bash (no grant) write to permission.json prompts config_write", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      let promptText = "";
+      let promptChoices: string[] = [];
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async (prompt: string, choices: string[]) => {
+          promptText = prompt;
+          promptChoices = choices;
+          return UI.deny;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const cmd = `(echo '{}' > ${join(projectRoot, ".pi/permission.json")})`;
+      await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-7",
+        input: { command: cmd },
+      });
+      assert.equal(promptChoices.length > 0, true, "unreliable bash write to permission.json must prompt config_write");
+      assert.ok(
+        !promptChoices.includes(UI.alwaysAllow) && !promptChoices.includes(UI.alwaysAllowCmd),
+        "config_write bash prompt must NOT offer always-allow",
+      );
+      assert.ok(
+        promptText.includes("Permission config write cannot be persisted") ||
+          promptText.includes("权限配置写操作不可持久化"),
+        `config_write subtitle missing: ${promptText}`,
+      );
+      // Audit-log contract (side-effects): bash-source config_write →
+      // declaration config_write, grant_source bash_grant_memory (bash-first).
+      await new Promise((r) => setTimeout(r, 100));
+      const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
+      const raw = await readFile(auditPath, "utf8").catch(() => "");
+      assert.ok(raw.includes('"declaration":"config_write"'), "audit declaration must be config_write");
+      assert.ok(raw.includes('"grant_source":"bash_grant_memory"'), "bash config_write grant_source must be bash_grant_memory");
+    },
+  );
+});
+
+test("SYS-CP8: unreliable bash (no grant) write to trusted.json is hard-denied (L1)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const cmd = `(echo '{}' > ${join(trustedDir, "trusted.json")})`;
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-8",
+        input: { command: cmd },
+      });
+      assert.equal(result?.block, true, "unreliable bash write to trusted.json must block (L1 deny_hard)");
+    },
+  );
+});
+
+test("SYS-CP9: unreliable bash with grant touching permission.json prompts config_write (not auto-allowed)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      let prompts = 0;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompts++;
+          return UI.allowSession;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      const cmd = `(echo '{}' > ${join(projectRoot, ".pi/permission.json")})`;
+      // First run (no grant) → config_write prompt → user allows session.
+      await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-9a",
+        input: { command: cmd },
+      });
+      const firstPrompts = prompts;
+      assert.equal(firstPrompts, 1, "first run must prompt config_write");
+      // Audit-log contract: config_write allow_session → permission=null
+      // (no configured permission level), even for a bash-source prompt.
+      await new Promise((r) => setTimeout(r, 100));
+      const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
+      const raw = await readFile(auditPath, "utf8").catch(() => "");
+      const allowSess = raw.split("\n").find((l) => l.includes('"event":"allow_session"'));
+      assert.ok(allowSess, "allow_session audit record must exist");
+      assert.ok(allowSess.includes('"permission":null'), "config_write allow_session must log permission=null");
+      assert.ok(allowSess.includes('"declaration":"config_write"'), "config_write allow_session must log declaration=config_write");
+      // Second run (grant now exists) → grant branch → must STILL prompt
+      // config_write (grant does not auto-allow config writes).
+      const second = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-9b",
+        input: { command: cmd },
+      });
+      assert.equal(prompts, 2, "second run must still prompt (grant must not auto-allow config-write)");
+      assert.notEqual(second?.block, true, "second run is a prompt, not a hard-deny");
+    },
+  );
+});
+
+test("SYS-CP10: unreliable bash env-var ($PWD) write to project permission.json prompts config_write", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      let promptText = "";
+      let promptChoices: string[] = [];
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async (prompt: string, choices: string[]) => {
+          promptText = prompt;
+          promptChoices = choices;
+          return UI.deny;
+        },
+      });
+      registerCpGate(pi, projectRoot, trustedDir);
+      // $PWD expands to projectRoot in the scan (mirrors the bash extractor),
+      // so $PWD/.pi/permission.json resolves to the protected project config.
+      const cmd = `(echo '{}' > "${"$"}PWD/.pi/permission.json")`;
+      await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-10",
+        input: { command: cmd },
+      });
+      assert.equal(promptChoices.length > 0, true, "env-var config-write must prompt (not tier=three or silent)");
+      assert.ok(
+        !promptChoices.includes(UI.alwaysAllow) && !promptChoices.includes(UI.alwaysAllowCmd),
+        "env-var config-write must not offer always-allow",
+      );
+      assert.ok(
+        promptText.includes("Permission config write cannot be persisted") ||
+          promptText.includes("权限配置写操作不可持久化"),
+        `config_write subtitle missing: ${promptText}`,
+      );
+    },
+  );
+});
+
+test("SYS-CP11: unreliable bash case-variant write to trusted.json is hard-denied (scan case-fold)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerCpGate(pi, projectRoot, trustedDir);
+      // Case-variant form of the protected trusted.json path (case-insensitive
+      // macOS/Windows FS) must be hard-denied via the scan's case-fold.
+      const cmd = `(echo '{}' > ${join(trustedDir, "TRUSTED.JSON")})`;
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "bash",
+        toolCallId: "tc-cp-11",
+        input: { command: cmd },
+      });
+      assert.equal(result?.block, true, "case-variant trusted.json write must block (scan case-fold)");
+    },
+  );
+});

@@ -49,12 +49,12 @@
 | `path` | 绝对路径 \| null | 目标路径（bash 命令可能为 null） |
 | `command` | 字符串 \| null | bash 命令原文（文件工具为 null）。当字符串长度 > 512 字符时，MUST 被截断为前 511 字符 + 尾部 `…`，并追加 `note: "command truncated"` |
 | `region` | `"project_inner" \| "project_outer"` | 区域判定 |
-| `declaration` | `"read_write" \| "read_only" \| "unread" \| "sensitive_default" \| "unconfigured"` | 触发本次决策的声明类型 |
+| `declaration` | `"read_write" \| "read_only" \| "unread" \| "sensitive_default" \| "unconfigured" \| "config_write"` | 触发本次决策的声明类型（`config_write` 见 access-decision「配置写保护」要求） |
 | `permission` | `"read_write" \| "read_only" \| null` | 若已配置则记录权限级别 |
 | `toolCallId` | 字符串 | pi 分配的 tool call id |
 | `note` | 字符串 \| 缺省 | 附加说明（如"no UI, denied"、"unreliable bash extraction"、"command truncated"） |
 
-`command` 字段截断约束（本 change 新增）：
+`command` 字段截断约束：
 
 - 阈值固定为 512 字符
 - 截断保留前 511 字符并追加 Unicode 省略号 `…`
@@ -66,6 +66,11 @@
 
 - **WHEN** 用户拒绝一次 tier=three 弹窗
 - **THEN** 审计日志新增记录包含 `event="deny"`、`tool="write"`、`path="/abs/path"`、`projectHash`、`permission="read_write"`、`toolCallId`
+
+#### Scenario: 配置写弹窗记录字段完整
+
+- **WHEN** 用户拒绝一次 `declaration="config_write"` 弹窗（写 permission.json，见 access-decision「配置写保护」）
+- **THEN** 审计日志新增记录 `declaration="config_write"`、`permission=null`（配置写无已配置权限级别）
 
 #### Scenario: command 字段超过 512 字符被截断并追加 note
 
@@ -174,6 +179,7 @@
 **grant_source 派生规则**（真人弹窗事件）：
 - 弹窗触发的 Decision.declaration 为 `read_write` 或 `read_only` → `grant_source === "config_declaration"`
 - 弹窗触发的 Decision.declaration 为 `sensitive_default` 或 `unconfigured` → `grant_source === "default"`
+- 弹窗触发的 Decision.declaration 为 `config_write` 且**非 bash 来源**（文件工具，见 access-decision「配置写保护」）→ `grant_source === "default"`（对齐 `promptGrantSource` 既有 fallthrough，`extensions/index.ts:199`）；bash 来源的 config_write 弹窗 → 按下方 bash 规则优先，`grant_source === "bash_grant_memory"`（`promptGrantSource` bash-first 分支，`extensions/index.ts:195`）
 - bash 命令授权事件（bashReason 存在）→ `grant_source === "bash_grant_memory"`（本次授权将写入 bash grant memory）
 - path-based 弹窗（非 bash）→ `grant_source` 缺省（真人授权事件本身不写入 path grant memory；写入的 grant 是新的，其 authorization 属性由本条审计记录的 `authorization: "by_person"` 语义表达）
 
@@ -181,6 +187,11 @@
 
 - **WHEN** 用户对 tier=three 弹窗选"总是允许"
 - **THEN** 审计日志 `event: "allow_persistent"`，`authorization: "by_person"`，`grant_source` 按弹窗触发来源派生（如 `config_declaration` 或 `default`）
+
+#### Scenario: 配置写弹窗授权来源为 default
+
+- **WHEN** 用户对 `declaration="config_write"` 弹窗（写 permission.json）选"允许本会话"
+- **THEN** 审计日志 `event: "allow_session"`，`authorization: "by_person"`，`grant_source === "default"`
 
 #### Scenario: 真人"拒绝"选择也标 by_person
 

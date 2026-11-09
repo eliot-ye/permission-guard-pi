@@ -116,6 +116,8 @@ const en: Bundle = {
     "Sensitive system path cannot be persisted. To allow permanently, edit permission.json.",
   subtitle_network_exfil_not_persistable:
     "Network exfiltration path cannot be persisted. Every write requires confirmation.",
+  subtitle_config_write_not_persistable:
+    "Permission config write cannot be persisted. To allow permanently, edit permission.json.",
   // permission-toggle (P3)
   permission_status_enabled: "🔒 Permission guard enabled",
   permission_status_disabled: "🔓 Permission guard disabled",
@@ -221,6 +223,8 @@ const zh: Bundle = {
     "敏感系统路径不能持久化。如需长期允许，请编辑 permission.json。",
   subtitle_network_exfil_not_persistable:
     "网络外带路径不能持久化。每次写入都需确认。",
+  subtitle_config_write_not_persistable:
+    "权限配置写操作不可持久化。如需长期允许，请直接编辑 permission.json。",
   // permission-toggle (P3)
   permission_status_enabled: "🔒 权限守卫已启用",
   permission_status_disabled: "🔓 权限守卫已关闭",
