@@ -530,9 +530,6 @@
 - **WHEN** 全局配置声明 `~/.ssh/known_hosts = "read_write"`，工具读写该文件
 - **THEN** 决策为 auto_allow（配置声明优先，与既有 override 语义一致）
 
-- **WHEN** 全局配置声明 `~/.ssh/known_hosts = "read_write"`，工具读写该文件
-- **THEN** 决策为 auto_allow（配置声明优先，与既有 override 语义一致）
-
 ### Requirement: tier 语义作为持久化能力标签
 
 `Decision.PromptTier` 类型 `"three" | "two"` 承载**持久化能力语义**而非"来源"或"敏感程度"标签：

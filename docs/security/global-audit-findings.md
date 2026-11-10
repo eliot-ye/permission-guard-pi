@@ -153,6 +153,8 @@ bash 命令 → 解析 → reliable（可靠，精确提取目标）/ unreliable
 
 ### 🔴 极高：盲区 A —— 管道第 2+ stage 的命令完全逃过命令名守卫
 
+> **✅ 已修复（bash-extract-fail-closed-hardening change，2026-11-06，commit `1a306d9`）**：本盲区**已修复**。写 flag 守卫（`scanFindWriteFlags`）已改为遍历 `splitPipelines` 拆出的**每个 pipeline stage**，不再只查 fragment 首命令——管道下游的 `find -delete` / `-exec` 写形态现在会被检出并判不可靠（D1 修复项）。spec 已新增「管道每个 stage 独立执行写 flag 守卫」「目标提取不可靠降级（fail-closed）」两个 requirement 覆盖该契约。以下为审核当时的原始发现，保留备查。
+
 **根因**：`scanFindWriteFlags`、`isAnyUnreliableCommand` 只检查每个 fragment（按 `;`/`&&`/`||`/`&`/`\n` 拆分）的**首命令**，**不遍历管道 stage**。管道下游的命令（第 2+ stage）不可见。
 
 **实测**（均被判 `reliable:true`）：
@@ -167,6 +169,8 @@ cat x | sed -i s/a/b/ file                                      → 0 target，�
 **修复方向**：让步骤 0/4 的守卫也遍历 `splitPipelines` 的每个 stage，而不只检查 fragment 首命令。
 
 ### 🔴 高：盲区 B —— 未知命令 fail-open 到 0-target reliable
+
+> **✅ 已修复（bash-extract-fail-closed-hardening change，2026-11-06，commit `1a306d9`）**：本盲区**已按 fail-closed 方向收口**。entry.ts 的 4b silent-form 分支改为：SILENT 命令若**形态不符**（如 `git log /etc/passwd`、`npm run build`、`tsc --outDir /tmp/x`）不再 fall through 到 0-target reliable，而是判 `unreliable_command` 弹窗（D3 及关联修复项）；外层重定向目标不可解析时亦 fail-closed 降级（不再静默放行）。配合 `FILE_ARG_COMMANDS` 扩充，未知命令与无 extractor 命令的裸词路径不再被静默放行。剩余覆盖边界（完全不在三张表内的全新命令名）仍是已知边界，由「不可靠 → 弹窗」兜底。以下为审核当时的原始发现，保留备查。
 
 **根因**：任何不在 `COMMAND_TABLE ∪ SILENT_COMMANDS ∪ UNRELIABLE_COMMANDS` 的命令 → `reliable:true, targets:[]`（entry.ts:348，silent.ts:42 自认这是"留给未来的已知边界"）。
 
