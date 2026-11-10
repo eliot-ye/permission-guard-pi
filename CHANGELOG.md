@@ -4,6 +4,17 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-10
+
+### Added
+
+- **配置写硬拒（P0 config-write-hard-deny）**：`permission.json`（global/project/local）自身写/delete 从 `prompt tier=two` 升级为 **`deny_hard`**，判定提前到 grant 检查之前——不可被 session/persistent grant、配置声明豁免（对齐 ta-agent「审批配置恒 deny、不受记忆豁免」）。收口原「一次人批即可改配置自我提权」缺口（如写入 `{"**":"read_write"}`）。保留 `declaration: "config_write"` 作为 deny 溯源标记；移除 `subtitle_config_write_not_persistable` 副文本码（`deny_hard` 不弹窗）。详见 `openspec/changes/archive/2026-11-10-config-write-hard-deny/`。
+- **path-based deny 层 + `!` 否定豁免（P1 deny-path-negation-glob）**：`permission.json` 新增 `deny` 段——path glob 列表，`!` 前缀条目为否定豁免（顺序无关例外集语义，非 gitignore last-match-wins）。三档配置 `deny` 段 additive 合并（多源收紧，非优先级覆盖），相对 pattern 限 projectRoot 内生效。`decide()` 新增 step 0.5 deny-path 检查（tool+pattern deny 之后、path 解析之前），命中即 `deny_hard`。新增 `isDenyHit` / `globDenyToRegExp` 纯函数（`src/lib/path-utils.ts`，对齐 ta-agent `glob.ts`）+ `deny_path_hit` reason-code + i18n 键。**`!` 豁免只作用于用户 `deny` 段，不作用于 `sensitive.ts` hard 敏感规则**（硬基线保留）。详见 `openspec/changes/archive/2026-11-10-deny-path-negation-glob/`。
+
+### Security
+
+- 两个 change 均通过 change 级收尾 review（**APPROVED**，subagent 隔离评审）：P0 deny 不可被 grant/配置声明/大小写变体/符号链接绕过；P1 `!` 例外集语义正确、相对 pattern 不泄漏 projectRoot 外、`globDenyToRegExp` 转义完整无 ReDoS。
+
 ## [0.2.1] - 2026-10-28
 
 ### Added
