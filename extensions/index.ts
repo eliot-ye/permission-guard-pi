@@ -499,23 +499,28 @@ function installPromptGuardrails(pi: any): void {
 // -------- Permission gate registration --------
 
 /**
- * config-self-protect (D5): scan a (possibly unreliable) bash command's bare
- * path tokens for the L1 runtime-state and L2 config-write protected paths.
+ * config-self-protect (D5) + config-write-hard-deny (D4): scan a (possibly
+ * unreliable) bash command's bare path tokens for the L1 runtime-state and L2
+ * config-write protected paths.
  *
  * Conservative for unreliable bash: the action is unknown, so any protected
- * permission.json token is treated as a potential write (fail-closed) — the
- * caller decides whether to hard-deny (L1) or prompt config_write (L2).
+ * permission.json token is treated as a potential write (fail-closed). Both L1
+ * and L2 now hard-deny (config-write-hard-deny upgraded L2 from a config_write
+ * prompt to deny_hard), so the return distinguishes only the audit declaration.
  * Reliable bash is covered separately via decideTarget's own L1/L2 pre-checks
  * (per-target, action-aware), so this helper is only for the unreliable paths.
  *
  * Returns:
- *   - "deny_hard"          — an L1 runtime-state path token (trusted.json /
- *     settings.json) was found; the whole command must be hard-denied.
- *   - "config_write-prompt" — an L2 permission.json path token was found; the
- *     command must prompt config_write (never auto-allowed by a grant).
- *   - null                 — no protected path token.
+ *   - { kind: "deny_hard", declaration: "unconfigured" } — an L1 runtime-state
+ *     path token (trusted.json / settings.json) was found; hard-denied.
+ *   - { kind: "deny_hard", declaration: "config_write" } — an L2 permission.json
+ *     path token was found; hard-denied (never auto-allowed by a grant).
+ *   - null — no protected path token.
  */
-function scanBashProtectedPaths(command: string, state: SessionState): "deny_hard" | "config_write-prompt" | null {
+function scanBashProtectedPaths(
+  command: string,
+  state: SessionState,
+): { kind: "deny_hard"; declaration: "unconfigured" | "config_write" } | null {
   const trustedPath = state.trust.path;
   const settingsPath = join(dirname(trustedPath), "settings.json");
   const configPaths = [state.configPaths.global, state.configPaths.project, state.configPaths.local];
@@ -538,39 +543,35 @@ function scanBashProtectedPaths(command: string, state: SessionState): "deny_har
     // (e.g. `TRUSTED.JSON` on a case-insensitive macOS/Windows FS) still
     // matches — the scan does no realpath canonicalization, so this is the
     // fail-closed equivalent of decideTarget's canonicalPath dual-input.
+    // L1 runtime-state hit → deny_hard, declaration=unconfigured.
     if (isProtectedRuntimeState(absPath.toLowerCase(), trustedPath.toLowerCase(), settingsPath.toLowerCase())) {
-      return "deny_hard";
+      return { kind: "deny_hard", declaration: "unconfigured" };
     }
+    // L2 config-write hit → deny_hard (config-write-hard-deny D4), declaration=config_write.
     if (isConfigWritePath("write", absPath.toLowerCase(), configPaths.map((p) => p.toLowerCase()))) {
-      return "config_write-prompt";
+      return { kind: "deny_hard", declaration: "config_write" };
     }
   }
   return null;
 }
 
-// config-self-protect (D5): the L2 config-write prompt Decision is identical
-// across the two unreliable-bash branches, so it is built once here.
-function bashConfigWriteDecision(): Decision {
-  return {
-    kind: "prompt",
-    region: "project_outer",
-    declaration: "config_write",
-    configured: false,
-    reason: "Permission config write/delete is self-protected in bash command",
-    tier: "two",
-  };
-}
+// config-write-hard-deny (D4): the L2 config-write prompt Decision builder is
+// removed — L2 now hard-denies via logBashSelfProtectDeny (declaration=config_write),
+// so there is no config-write prompt to build.
 
-// config-self-protect (D5): the L1 runtime-state hard-deny audit + block is
+// config-write-hard-deny (D4): the L1 runtime-state hard-deny audit + block is
 // shared by the unreliable+grant and unreliable+no-grant branches; only the
-// note prefix differs ("grant bypassed" vs "hard-denied").
+// note prefix differs ("grant bypassed" vs "hard-denied"). The `declaration`
+// field distinguishes L1 ("unconfigured") from L2 ("config_write") provenance.
 function logBashSelfProtectDeny(
   state: SessionState,
   event: { toolCallId: string },
   command: string,
   bashReason: string | undefined,
   prefix: "grant bypassed" | "hard-denied",
+  declaration: "unconfigured" | "config_write" = "unconfigured",
 ): { block: true; reason: string } {
+  const label = declaration === "config_write" ? "permission config" : "runtime-state file";
   state.audit.log({
     event: "hard_deny",
     tool: "bash",
@@ -579,15 +580,15 @@ function logBashSelfProtectDeny(
     path: null,
     command,
     region: "project_outer",
-    declaration: "unconfigured",
+    declaration,
     permission: null,
     toolCallId: event.toolCallId,
     // D2: hard_deny is a system decision → presumed.
     authorization: "presumed",
     ...(bashReason ? { bash_reason: bashReason } : {}),
-    note: `Bash command ${prefix}: runtime-state file is self-protected: ${command}`,
+    note: `Bash command ${prefix}: ${label} is self-protected: ${command}`,
   });
-  return { block: true, reason: "Runtime-state file is self-protected in bash command" };
+  return { block: true, reason: `${label === "permission config" ? "Permission config" : "Runtime-state file"} is self-protected in bash command` };
 }
 
 export function registerPermissionGate(
@@ -769,25 +770,12 @@ export function registerPermissionGate(
         }
       }
 
-      // config-self-protect (D5): a bash-command grant must NOT bypass the
-      // L1 runtime-state hard-deny (non-bypassable, aligned with unread) or
-      // the L2 config-write prompt (grant does not auto-allow config writes).
+      // config-write-hard-deny (D4): a bash-command grant must NOT bypass the
+      // L1 runtime-state hard-deny or the L2 config-write hard-deny (both
+      // non-bypassable, aligned with unread). L2 is now deny_hard too.
       const protectedHit = scanBashProtectedPaths(command, state);
-      if (protectedHit === "deny_hard") {
-        return logBashSelfProtectDeny(state, event, command, extraction.reason, "grant bypassed");
-      }
-      if (protectedHit === "config_write-prompt") {
-        return handlePromptDecision(
-          event,
-          ctx,
-          state,
-          bashConfigWriteDecision(),
-          null,
-          command,
-          "write",
-          extraction.reason,
-          bashPermissionForReason(extraction.reason),
-        );
+      if (protectedHit !== null) {
+        return logBashSelfProtectDeny(state, event, command, extraction.reason, "grant bypassed", protectedHit.declaration);
       }
 
       state.audit.log({
@@ -840,25 +828,13 @@ export function registerPermissionGate(
         return { block: true, reason: `Denied by rule ${ruleMatch.tool}(${ruleMatch.pattern ?? "*"})` };
       }
 
-      // config-self-protect (D5): unreliable bash with no grant still runs the
-      // L1/L2 token scan so a `echo '...' > trusted.json` or `> permission.json`
-      // is captured (fail-closed) BEFORE the generic tier=three prompt.
+      // config-write-hard-deny (D4): unreliable bash with no grant still runs
+      // the L1/L2 token scan so a `echo '...' > trusted.json` or `> permission.json`
+      // is captured (fail-closed) BEFORE the generic tier=three prompt. Both
+      // are now deny_hard.
       const protectedHit = scanBashProtectedPaths(command, state);
-      if (protectedHit === "deny_hard") {
-        return logBashSelfProtectDeny(state, event, command, extraction.reason, "hard-denied");
-      }
-      if (protectedHit === "config_write-prompt") {
-        return handlePromptDecision(
-          event,
-          ctx,
-          state,
-          bashConfigWriteDecision(),
-          null,
-          command,
-          "write",
-          extraction.reason,
-          bashPermissionForReason(extraction.reason),
-        );
+      if (protectedHit !== null) {
+        return logBashSelfProtectDeny(state, event, command, extraction.reason, "hard-denied", protectedHit.declaration);
       }
 
       // Tier=two prompt showing the raw command.
@@ -1145,6 +1121,41 @@ export function registerPermissionGate(
       }
     }
 
+    // L2 config-write self-protection (config-write-hard-deny D2): a write/delete
+    // of a permission.json config file is hard-denied, non-bypassable. Runs
+    // BEFORE the grant check (aligned with L1 runtime-state and the unread
+    // non-bypassable invariant) so neither a session grant, a persistent grant,
+    // nor a config declaration (evaluated inside decide()) can silence it — a
+    // single human approval can no longer rewrite config to self-escalate.
+    // declaration="config_write" is kept as the deny provenance marker (distinguishes
+    // "this deny was triggered by config-write self-protection" from a plain
+    // unconfigured deny).
+    {
+      const configPaths = state.configPaths;
+      const hitsConfigWrite =
+        action === "write" || action === "delete"
+          ? isConfigWritePath(action, resolvedAbs, [
+              configPaths.global,
+              configPaths.project,
+              configPaths.local,
+            ]) || isConfigWritePath(action, canonicalPath, [
+              configPaths.global,
+              configPaths.project,
+              configPaths.local,
+            ])
+          : false;
+      if (hitsConfigWrite) {
+        return {
+          kind: "deny_hard",
+          region: inside ? "project_inner" : "project_outer",
+          declaration: "config_write",
+          configured: false,
+          reason: `Permission config write/delete is self-protected: ${resolvedAbs}`,
+          denial: { reason: "Permission config write/delete is hard-denied (config is user-managed)" },
+        };
+      }
+    }
+
     // Check memory (session + persistent) BEFORE calling decide().
     // Dual-key lookup (V3 fix, bash-symlink-grant-key-fix): bash reliable
     // branch stores persistent grant keyed by resolvedPath (realpath), but
@@ -1179,38 +1190,6 @@ export function registerPermissionGate(
         grant_source: "grant_memory",
         reason: `Grant memory hit for ${grantHitPath}`,
       };
-    }
-
-    // L2 config-write self-protection (config-self-protect D4): a write/delete
-    // of a permission.json config file is elevated to a tier=two prompt with
-    // declaration="config_write". Runs AFTER the grant check but BEFORE
-    // decide() so a config declaration (evaluated inside decide()) cannot
-    // silence it, and it is never auto-allowed by an in-project non-sensitive
-    // rule. tier=two means no "Always allow" — the change is not persistable.
-    {
-      const configPaths = state.configPaths;
-      const hitsConfigWrite =
-        action === "write" || action === "delete"
-          ? isConfigWritePath(action, resolvedAbs, [
-              configPaths.global,
-              configPaths.project,
-              configPaths.local,
-            ]) || isConfigWritePath(action, canonicalPath, [
-              configPaths.global,
-              configPaths.project,
-              configPaths.local,
-            ])
-          : false;
-      if (hitsConfigWrite) {
-        return {
-          kind: "prompt",
-          region: inside ? "project_inner" : "project_outer",
-          declaration: "config_write",
-          configured: false,
-          reason: `Permission config write/delete is self-protected: ${resolvedAbs}`,
-          tier: "two",
-        };
-      }
     }
 
     // Run decision engine.
@@ -1273,9 +1252,7 @@ export function registerPermissionGate(
       // Bash-command class prompt: dispatch by extraction reason.
       subtitle = bashSubtitleForReason(bashReason, state.lang);
     } else if (decision.tier === "two") {
-      if (decision.declaration === "config_write") {
-        subtitle = t("subtitle_config_write_not_persistable" as UiCode, state.lang);
-      } else if (decision.declaration === "sensitive_default") {
+      if (decision.declaration === "sensitive_default") {
         subtitle = t("subtitle_sensitive_hard_not_persistable" as UiCode, state.lang);
       } else if (decision.reason.startsWith("Network exfiltration")) {
         subtitle = t("subtitle_network_exfil_not_persistable" as UiCode, state.lang);

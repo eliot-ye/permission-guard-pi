@@ -1257,18 +1257,16 @@ test("SYS-CP2: write settings.json is hard-denied (L1 runtime-state)", async () 
   );
 });
 
-test("SYS-CP3: write project permission.json prompts tier=two without always-allow", async () => {
+test("SYS-CP3: write project permission.json is hard-denied (L2 config-write, no prompt)", async () => {
   await withSandbox(
     async () => {},
     async ({ projectRoot, trustedDir }) => {
-      let promptChoices: string[] = [];
-      let promptText = "";
+      let prompted = false;
       const { pi, ctx } = createMockPi({
         projectRoot,
-        uiChoice: async (prompt: string, choices: string[]) => {
-          promptText = prompt;
-          promptChoices = choices;
-          return UI.deny;
+        uiChoice: async () => {
+          prompted = true;
+          return UI.allowOnce;
         },
       });
       registerCpGate(pi, projectRoot, trustedDir);
@@ -1277,34 +1275,24 @@ test("SYS-CP3: write project permission.json prompts tier=two without always-all
         toolCallId: "tc-cp-3",
         input: { path: join(projectRoot, ".pi/permission.json"), content: '{"**":"read_write"}' },
       });
-      // A prompt decision surfaces via result (block:false) + audit; capture that it prompted.
-      assert.equal(promptChoices.length > 0, true, "config write must prompt");
-      assert.ok(
-        !promptChoices.includes(UI.alwaysAllow),
-        `config write must NOT offer always-allow, got: ${promptChoices.join(",")}`,
-      );
-      assert.ok(
-        !promptChoices.includes(UI.alwaysAllowCmd),
-        `config write must NOT offer always-allow-cmd, got: ${promptChoices.join(",")}`,
-      );
-      // config_write subtitle must be dispatched (approval-flow spec).
-      assert.ok(
-        promptText.includes("Permission config write cannot be persisted") ||
-          promptText.includes("权限配置写操作不可持久化"),
-        `config_write subtitle missing from prompt: ${promptText}`,
-      );
-      // Audit-log contract (side-effects): non-bash config_write → declaration
-      // config_write, grant_source default (not read_write/read_only).
+      // L2 config-write is now deny_hard (aligned with ta-agent "审批配置由用户手动管理"):
+      // blocks with NO prompt — a single human approval can no longer rewrite config.
+      assert.equal(result?.block, true, "write permission.json must block (deny_hard)");
+      assert.equal(prompted, false, "L2 config-write deny_hard must not prompt");
+      // Audit-log contract (side-effects): config-write deny → hard_deny,
+      // declaration=config_write, authorization=presumed, no grant_source.
       await new Promise((r) => setTimeout(r, 100));
       const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
       const raw = await readFile(auditPath, "utf8").catch(() => "");
-      assert.ok(raw.includes('"declaration":"config_write"'), "audit declaration must be config_write");
-      assert.ok(raw.includes('"grant_source":"default"'), "non-bash config_write grant_source must be default");
+      const hardDeny = raw.split("\n").find((l) => l.includes('"event":"hard_deny"'));
+      assert.ok(hardDeny, "hard_deny audit record must exist");
+      assert.ok(hardDeny.includes('"declaration":"config_write"'), "audit declaration must be config_write");
+      assert.ok(hardDeny.includes('"authorization":"presumed"'), "config-write deny_hard must be presumed (system decision)");
     },
   );
 });
 
-test("SYS-CP4: config declaration read_write does not silence config-write prompt", async () => {
+test("SYS-CP4: config declaration read_write does not silence config-write hard-deny", async () => {
   await withSandbox(
     async (env: any) => {
       await writeFile(
@@ -1318,16 +1306,19 @@ test("SYS-CP4: config declaration read_write does not silence config-write promp
         projectRoot,
         uiChoice: async () => {
           prompted = true;
-          return UI.deny;
+          return UI.allowOnce;
         },
       });
       registerCpGate(pi, projectRoot, trustedDir);
-      await fireToolCall(pi, ctx, {
+      const result = await fireToolCall(pi, ctx, {
         toolName: "write",
         toolCallId: "tc-cp-4",
         input: { path: join(projectRoot, ".pi/permission.json"), content: '{"**":"read_write"}' },
       });
-      assert.equal(prompted, true, "config declaration must NOT silence config-write prompt");
+      // Config declaration read_write must NOT silence config-write self-protection —
+      // now deny_hard (was prompt tier=two).
+      assert.equal(result?.block, true, "config declaration must NOT silence config-write hard-deny");
+      assert.equal(prompted, false, "config-write deny_hard must not prompt");
     },
   );
 });
@@ -1368,44 +1359,37 @@ test("SYS-CP6: reliable bash write to trusted.json is hard-denied (L1)", async (
   );
 });
 
-test("SYS-CP7: unreliable bash (no grant) write to permission.json prompts config_write", async () => {
+test("SYS-CP7: unreliable bash (no grant) write to permission.json is hard-denied (L2)", async () => {
   await withSandbox(
     async () => {},
     async ({ projectRoot, trustedDir }) => {
-      let promptText = "";
-      let promptChoices: string[] = [];
+      let prompted = false;
       const { pi, ctx } = createMockPi({
         projectRoot,
-        uiChoice: async (prompt: string, choices: string[]) => {
-          promptText = prompt;
-          promptChoices = choices;
-          return UI.deny;
+        uiChoice: async () => {
+          prompted = true;
+          return UI.allowOnce;
         },
       });
       registerCpGate(pi, projectRoot, trustedDir);
       const cmd = `(echo '{}' > ${join(projectRoot, ".pi/permission.json")})`;
-      await fireToolCall(pi, ctx, {
+      const result = await fireToolCall(pi, ctx, {
         toolName: "bash",
         toolCallId: "tc-cp-7",
         input: { command: cmd },
       });
-      assert.equal(promptChoices.length > 0, true, "unreliable bash write to permission.json must prompt config_write");
-      assert.ok(
-        !promptChoices.includes(UI.alwaysAllow) && !promptChoices.includes(UI.alwaysAllowCmd),
-        "config_write bash prompt must NOT offer always-allow",
-      );
-      assert.ok(
-        promptText.includes("Permission config write cannot be persisted") ||
-          promptText.includes("权限配置写操作不可持久化"),
-        `config_write subtitle missing: ${promptText}`,
-      );
-      // Audit-log contract (side-effects): bash-source config_write →
-      // declaration config_write, grant_source bash_grant_memory (bash-first).
+      // Unreliable bash hitting permission.json is now deny_hard (was prompt config_write).
+      assert.equal(result?.block, true, "unreliable bash write to permission.json must block (deny_hard)");
+      assert.equal(prompted, false, "config-write deny_hard must not prompt");
+      // Audit-log contract (side-effects): bash-source config-write deny →
+      // hard_deny, declaration=config_write, authorization=presumed.
       await new Promise((r) => setTimeout(r, 100));
       const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
       const raw = await readFile(auditPath, "utf8").catch(() => "");
-      assert.ok(raw.includes('"declaration":"config_write"'), "audit declaration must be config_write");
-      assert.ok(raw.includes('"grant_source":"bash_grant_memory"'), "bash config_write grant_source must be bash_grant_memory");
+      const hardDeny = raw.split("\n").find((l) => l.includes('"event":"hard_deny"'));
+      assert.ok(hardDeny, "hard_deny audit record must exist");
+      assert.ok(hardDeny.includes('"declaration":"config_write"'), "audit declaration must be config_write");
+      assert.ok(hardDeny.includes('"authorization":"presumed"'), "config-write deny_hard must be presumed");
     },
   );
 });
@@ -1427,7 +1411,7 @@ test("SYS-CP8: unreliable bash (no grant) write to trusted.json is hard-denied (
   );
 });
 
-test("SYS-CP9: unreliable bash with grant touching permission.json prompts config_write (not auto-allowed)", async () => {
+test("SYS-CP9: unreliable bash with grant touching permission.json is hard-denied (grant does not bypass)", async () => {
   await withSandbox(
     async () => {},
     async ({ projectRoot, trustedDir }) => {
@@ -1441,69 +1425,58 @@ test("SYS-CP9: unreliable bash with grant touching permission.json prompts confi
       });
       registerCpGate(pi, projectRoot, trustedDir);
       const cmd = `(echo '{}' > ${join(projectRoot, ".pi/permission.json")})`;
-      // First run (no grant) → config_write prompt → user allows session.
-      await fireToolCall(pi, ctx, {
+      // First run (no grant) → deny_hard (no prompt — config-write no longer promptable).
+      const first = await fireToolCall(pi, ctx, {
         toolName: "bash",
         toolCallId: "tc-cp-9a",
         input: { command: cmd },
       });
-      const firstPrompts = prompts;
-      assert.equal(firstPrompts, 1, "first run must prompt config_write");
-      // Audit-log contract: config_write allow_session → permission=null
-      // (no configured permission level), even for a bash-source prompt.
+      assert.equal(first?.block, true, "first run must deny_hard config-write (no prompt)");
+      assert.equal(prompts, 0, "config-write deny_hard must not prompt");
+      // config-write deny → hard_deny audit, declaration=config_write, presumed.
       await new Promise((r) => setTimeout(r, 100));
       const auditPath = join(trustedDir, "logs", "permission-review.jsonl");
       const raw = await readFile(auditPath, "utf8").catch(() => "");
-      const allowSess = raw.split("\n").find((l) => l.includes('"event":"allow_session"'));
-      assert.ok(allowSess, "allow_session audit record must exist");
-      assert.ok(allowSess.includes('"permission":null'), "config_write allow_session must log permission=null");
-      assert.ok(allowSess.includes('"declaration":"config_write"'), "config_write allow_session must log declaration=config_write");
-      // Second run (grant now exists) → grant branch → must STILL prompt
-      // config_write (grant does not auto-allow config writes).
+      const hardDeny = raw.split("\n").find((l) => l.includes('"event":"hard_deny"'));
+      assert.ok(hardDeny, "hard_deny audit record must exist");
+      assert.ok(hardDeny.includes('"declaration":"config_write"'), "config-write deny_hard must log declaration=config_write");
+      assert.ok(hardDeny.includes('"authorization":"presumed"'), "config-write deny_hard must be presumed");
+      // Second run → STILL deny_hard. The bash grant must NOT bypass config-write
+      // self-protection (a single approval can no longer rewrite config).
       const second = await fireToolCall(pi, ctx, {
         toolName: "bash",
         toolCallId: "tc-cp-9b",
         input: { command: cmd },
       });
-      assert.equal(prompts, 2, "second run must still prompt (grant must not auto-allow config-write)");
-      assert.notEqual(second?.block, true, "second run is a prompt, not a hard-deny");
+      assert.equal(second?.block, true, "second run must still deny_hard (grant must not bypass config-write)");
     },
   );
 });
 
-test("SYS-CP10: unreliable bash env-var ($PWD) write to project permission.json prompts config_write", async () => {
+test("SYS-CP10: unreliable bash env-var ($PWD) write to project permission.json is hard-denied (L2)", async () => {
   await withSandbox(
     async () => {},
     async ({ projectRoot, trustedDir }) => {
-      let promptText = "";
-      let promptChoices: string[] = [];
+      let prompted = false;
       const { pi, ctx } = createMockPi({
         projectRoot,
-        uiChoice: async (prompt: string, choices: string[]) => {
-          promptText = prompt;
-          promptChoices = choices;
-          return UI.deny;
+        uiChoice: async () => {
+          prompted = true;
+          return UI.allowOnce;
         },
       });
       registerCpGate(pi, projectRoot, trustedDir);
       // $PWD expands to projectRoot in the scan (mirrors the bash extractor),
       // so $PWD/.pi/permission.json resolves to the protected project config.
       const cmd = `(echo '{}' > "${"$"}PWD/.pi/permission.json")`;
-      await fireToolCall(pi, ctx, {
+      const result = await fireToolCall(pi, ctx, {
         toolName: "bash",
         toolCallId: "tc-cp-10",
         input: { command: cmd },
       });
-      assert.equal(promptChoices.length > 0, true, "env-var config-write must prompt (not tier=three or silent)");
-      assert.ok(
-        !promptChoices.includes(UI.alwaysAllow) && !promptChoices.includes(UI.alwaysAllowCmd),
-        "env-var config-write must not offer always-allow",
-      );
-      assert.ok(
-        promptText.includes("Permission config write cannot be persisted") ||
-          promptText.includes("权限配置写操作不可持久化"),
-        `config_write subtitle missing: ${promptText}`,
-      );
+      // Env-var config-write is now deny_hard (was prompt config_write).
+      assert.equal(result?.block, true, "env-var config-write must block (deny_hard)");
+      assert.equal(prompted, false, "config-write deny_hard must not prompt");
     },
   );
 });
@@ -1523,6 +1496,94 @@ test("SYS-CP11: unreliable bash case-variant write to trusted.json is hard-denie
         input: { command: cmd },
       });
       assert.equal(result?.block, true, "case-variant trusted.json write must block (scan case-fold)");
+    },
+  );
+});
+
+// ===== deny-path-negation-glob integration (path-based deny segment) =====
+
+function registerDpGate(
+  pi: any,
+  projectRoot: string,
+  trustedDir: string,
+): void {
+  // Identical wiring to registerCpGate — deny-path loads via the same config
+  // loading path (permission.json global/project/local `deny` segments).
+  registerCpGate(pi, projectRoot, trustedDir);
+}
+
+test("SYS-DP1: deny segment hit path is hard-denied", async () => {
+  await withSandbox(
+    async (env: any) => {
+      await writeFile(
+        env.projectConfig,
+        JSON.stringify({ deny: ["**/*.pem"] }),
+      );
+    },
+    async ({ projectRoot, trustedDir }) => {
+      let prompted = false;
+      const { pi, ctx } = createMockPi({
+        projectRoot,
+        uiChoice: async () => {
+          prompted = true;
+          return UI.allowOnce;
+        },
+      });
+      registerDpGate(pi, projectRoot, trustedDir);
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-dp-1",
+        input: { path: join(projectRoot, "certs", "root.pem"), content: "data" },
+      });
+      assert.equal(result?.block, true, "deny-path hit must block (deny_hard)");
+      assert.equal(prompted, false, "deny-path deny_hard must not prompt");
+    },
+  );
+});
+
+test("SYS-DP2: deny segment negation exemption is not denied by deny-path", async () => {
+  await withSandbox(
+    async (env: any) => {
+      await writeFile(
+        env.projectConfig,
+        JSON.stringify({ deny: ["**/*.pem", "!**/public.pem"] }),
+      );
+    },
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerDpGate(pi, projectRoot, trustedDir);
+      // public.pem is exempted by !**/public.pem → NOT denied by deny-path.
+      // It's an in-project non-sensitive write → auto_allow (not blocked).
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-dp-2",
+        input: { path: join(projectRoot, "certs", "public.pem"), content: "data" },
+      });
+      assert.notEqual(
+        result?.block, true,
+        "deny-path negation exemption must NOT be denied by deny-path",
+      );
+    },
+  );
+});
+
+test("SYS-DP3: no deny segment configured behaves as before (backward compat)", async () => {
+  await withSandbox(
+    async () => {},
+    async ({ projectRoot, trustedDir }) => {
+      const { pi, ctx } = createMockPi({ projectRoot });
+      registerDpGate(pi, projectRoot, trustedDir);
+      // In-project non-sensitive write → auto_allow (not blocked), same as before
+      // deny-path existed.
+      const result = await fireToolCall(pi, ctx, {
+        toolName: "write",
+        toolCallId: "tc-dp-3",
+        input: { path: join(projectRoot, "app.ts"), content: "data" },
+      });
+      assert.notEqual(
+        result?.block, true,
+        "no deny segment configured: in-project non-sensitive write must not be blocked",
+      );
     },
   );
 });

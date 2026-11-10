@@ -20,7 +20,7 @@
 
 import { promises as fs } from "node:fs";
 import { resolve as pathResolve } from "node:path";
-import { expandHome, toAbsolutePath, toKeyPath, matchesGlob } from "./path-utils.ts";
+import { expandHome, toAbsolutePath, toKeyPath, matchesGlob, isDenyHit } from "./path-utils.ts";
 
 export type Permission = "read_write" | "read_only" | "unread";
 export type Source = "local" | "project" | "global";
@@ -72,6 +72,9 @@ export interface MatchedEntry {
 export interface RawConfig {
   paths?: Record<string, string>;
   rules?: Array<{ tool: string; pattern?: string; action: string }>;
+  // Path-based deny segment (deny-path-negation-glob). Each entry is a path glob;
+  // `!` prefix = negation exemption. Order-independent exception-set semantics.
+  deny?: string[];
 }
 
 export interface MergedPolicy {
@@ -80,6 +83,10 @@ export interface MergedPolicy {
   resolve: (absolutePath: string) => MatchedEntry | undefined;
   resolveRule: (toolName: string, toolPattern: string) => RuleMatch | undefined;
   isDeclared: (absolutePath: string) => boolean;
+  // Path-based deny check (deny-path-negation-glob): true iff absPath hits any
+  // positive deny pattern AND no negation pattern. Three-tier deny segments are
+  // merged additively. Relative patterns are scoped inside projectRoot.
+  resolveDenyPath: (absolutePath: string) => boolean;
 }
 
 const VALID_PERMISSIONS = new Set<Permission>(["read_write", "read_only", "unread"]);
@@ -363,6 +370,16 @@ export function mergePolicies(
   addRules(projectRaw, "project");
   addRules(localRaw, "local");
 
+  // Deny segment (deny-path-negation-glob): three-tier additive merge (NOT
+  // priority-override — deny is a security-tightening direction, so multi-source
+  // deny segments stack; any source denying a path denies it). Aligned with
+  // ta-agent "全局与项目 deny 规则合并生效".
+  const allDenyPatterns: string[] = [
+    ...(globalRaw.deny ?? []),
+    ...(projectRaw.deny ?? []),
+    ...(localRaw.deny ?? []),
+  ].filter((x): x is string => typeof x === "string");
+
   // Collect wildcard-override warnings (tier-contract-consistency A4).
   // Runs AFTER all entries are added so it can inspect the full merged
   // policy set (all three sources together).
@@ -460,6 +477,41 @@ export function mergePolicies(
         },
         isDeclared: (absolutePath: string) => {
           return p.resolve(absolutePath) !== undefined;
+        },
+        resolveDenyPath: (absolutePath: string) => {
+          if (allDenyPatterns.length === 0) return false;
+          // Match deny patterns against the absolute path. Relative patterns are
+          // scoped inside projectRoot (aligned with resolve()): when absPath is
+          // inside projectRoot, a relative pattern matches the relative path;
+          // when absPath is outside projectRoot, relative patterns never match.
+          // Absolute patterns (/, ~, drive) are resolved to absolute and match
+          // against absPath anywhere. Returns true iff absPath hits any positive
+          // pattern AND no negation pattern (isDenyHit's exception-set semantics).
+          const abs = toKeyPath(absolutePath);
+          const rootNorm = projectRoot.replace(/\\/g, "/");
+          const sep_ = rootNorm.endsWith("/") ? "" : "/";
+          const rootWithSep = rootNorm + sep_;
+          const isInsideRoot =
+            abs.startsWith(rootWithSep) || abs === rootNorm;
+          const rel = isInsideRoot ? abs.slice(rootWithSep.length) : undefined;
+          const rootPrefix = isInsideRoot ? rootNorm + sep_ : "";
+
+          const expanded = allDenyPatterns.map((pat) => {
+            const isNeg = pat.startsWith("!");
+            const core = isNeg ? pat.slice(1) : pat;
+            const isAbs =
+              core.startsWith("/") ||
+              core.startsWith("~") ||
+              /^[A-Za-z]:\//.test(core);
+            if (isAbs) {
+              return (isNeg ? "!" : "") + toAbsolutePath(core, projectRoot);
+            }
+            // Relative pattern: prefix the project root so it only matches when
+            // absPath is inside projectRoot (and the tail matches the rel path).
+            return (isNeg ? "!" : "") + rootPrefix + core;
+          });
+
+          return isDenyHit(abs, expanded);
         },
       };
       return p;

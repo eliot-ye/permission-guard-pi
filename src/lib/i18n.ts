@@ -23,9 +23,11 @@ type Bundle = Record<ReasonCode | UiCode, string>;
 // -------- EN bundle --------
 
 const en: Bundle = {
-  // Decision reason codes (13)
+  // Decision reason codes (14)
   rule_denied:
     "Denied by rule {tool}({pattern}) from {source}",
+  deny_path_hit:
+    "Denied by deny-path segment: {path}",
   rule_allowed:
     "Allowed by rule {tool}({pattern}) from {source}",
   cross_source_unread_conflict:
@@ -116,8 +118,6 @@ const en: Bundle = {
     "Sensitive system path cannot be persisted. To allow permanently, edit permission.json.",
   subtitle_network_exfil_not_persistable:
     "Network exfiltration path cannot be persisted. Every write requires confirmation.",
-  subtitle_config_write_not_persistable:
-    "Permission config write cannot be persisted. To allow permanently, edit permission.json.",
   // permission-toggle (P3)
   permission_status_enabled: "🔒 Permission guard enabled",
   permission_status_disabled: "🔓 Permission guard disabled",
@@ -133,9 +133,11 @@ const en: Bundle = {
 // -------- ZH bundle --------
 
 const zh: Bundle = {
-  // Decision reason codes (13)
+  // Decision reason codes (14)
   rule_denied:
     "被 {source} 的规则 {tool}({pattern}) 拒绝",
+  deny_path_hit:
+    "被 deny-path 段拒绝：{path}",
   rule_allowed:
     "被 {source} 的规则 {tool}({pattern}) 允许",
   cross_source_unread_conflict:
@@ -223,8 +225,6 @@ const zh: Bundle = {
     "敏感系统路径不能持久化。如需长期允许，请编辑 permission.json。",
   subtitle_network_exfil_not_persistable:
     "网络外带路径不能持久化。每次写入都需确认。",
-  subtitle_config_write_not_persistable:
-    "权限配置写操作不可持久化。如需长期允许，请直接编辑 permission.json。",
   // permission-toggle (P3)
   permission_status_enabled: "🔒 权限守卫已启用",
   permission_status_disabled: "🔓 权限守卫已关闭",

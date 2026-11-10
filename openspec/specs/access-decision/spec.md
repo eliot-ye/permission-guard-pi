@@ -628,33 +628,49 @@ tier 分派的完整来源映射：
 
 ### Requirement: 配置写保护（permission.json 写保护）
 
-系统 MUST 对权限配置文件 `permission.json`（global `~/.pi/agent/permission.json`、project `<proj>/.pi/permission.json`、project-local `<proj>/.pi/local/permission.json`）的写 / delete，在无 session grant 时一律决策为 `prompt tier=two`：
+系统 MUST 对权限配置文件 `permission.json`（global `~/.pi/agent/permission.json`、project `<proj>/.pi/permission.json`、project-local `<proj>/.pi/local/permission.json`）的写 / delete 一律决策为 `deny_hard`：
 
-- 不静默 auto_allow（即使该项目内非敏感路径默认静默，MUST 仍 prompt）；
-- `declaration` 为 `"config_write"`；
-- 不可被配置声明静默化（即使声明 `"<permission.json 路径>": "read_write"`，MUST 仍 prompt）；
-- **无**"总是允许"（tier=two 不可持久化），session grant 可放行本会话；
+- 不弹窗、不静默 auto_allow（即使该项目内非敏感路径默认静默，MUST 仍 deny_hard）；
+- `declaration` 为 `"config_write"`（deny 溯源标记，区别于普通 `unconfigured` deny）；
+- 不可被配置声明覆盖（即使声明 `"<permission.json 路径>": "read_write"`，MUST 仍 deny_hard）；
+- 不可被授权记忆绕过（session grant 与 persistent grant 均 MUST NOT 放行——对齐 L1 运行时状态「不可被 grant 豁免」不变量，防止一次人批即改配置自我提权）；
+- 自保护判定 MUST 在授权记忆查询**之前**执行（保证不可豁免）；
 - 读这些文件 MUST 不受影响（按常规规则判定）。
 
 #### Scenario: 写项目 permission.json 弹两档
 
 - **WHEN** 工具写 `<proj>/.pi/permission.json`（项目内、非敏感、无 session grant）
-- **THEN** 决策为 prompt tier=two，`declaration` 为 `"config_write"`，弹窗不出现"总是允许"
+- **THEN** 决策为 deny_hard，`declaration` 为 `"config_write"`，不弹窗（原判 prompt tier=two，本 change 升级为硬 deny）
 
 #### Scenario: 写 project-local permission.json 弹两档
 
 - **WHEN** 工具写 `<proj>/.pi/local/permission.json`（无 session grant）
-- **THEN** 决策为 prompt tier=two，`declaration` 为 `"config_write"`
+- **THEN** 决策为 deny_hard，`declaration` 为 `"config_write"`
 
 #### Scenario: 写全局 permission.json 弹两档
 
 - **WHEN** 工具写 `~/.pi/agent/permission.json`（无 session grant）
-- **THEN** 决策为 prompt tier=two，`declaration` 为 `"config_write"`
+- **THEN** 决策为 deny_hard，`declaration` 为 `"config_write"`
+
+#### Scenario: delete permission.json 硬拒
+
+- **WHEN** 工具 delete 任一 `permission.json`
+- **THEN** 决策为 deny_hard，`declaration` 为 `"config_write"`
 
 #### Scenario: 配置声明不能静默化
 
 - **WHEN** 配置声明 `"<permission.json 路径>": "read_write"`，工具仍写该文件（无 session grant）
-- **THEN** 决策为 prompt tier=two（配置声明不使配置写静默）
+- **THEN** 决策为 deny_hard（配置声明不豁免配置写自保护）
+
+#### Scenario: session grant 不能绕过配置写保护
+
+- **WHEN** 用户曾在会话内对 `permission.json` 获得放行（session grant 存在），工具再写该文件
+- **THEN** 决策为 deny_hard（session grant 在配置写自保护判定前不检查——一次人批不可改配置）
+
+#### Scenario: persistent grant 不能绕过配置写保护
+
+- **WHEN** `permission.json` 存在持久化 grant，工具写该文件
+- **THEN** 决策为 deny_hard（配置写自保护在 grant 检查前执行，不可豁免）
 
 #### Scenario: 读 permission.json 不受影响
 
@@ -663,10 +679,65 @@ tier 分派的完整来源映射：
 
 #### Scenario: bash 写目标命中 permission.json
 
-- **WHEN** bash 命令含写目标为 `permission.json`（例如 `echo '{"**":"read_write"}' > <permission.json 路径>`，无 session grant）
-- **THEN** 决策为 prompt tier=two（bash 写目标扫描命中配置写保护）
+- **WHEN** bash 命令可靠且含写目标为 `permission.json`（例如 `echo '{"**":"read_write"}' > <permission.json 路径>`）
+- **THEN** 决策为 deny_hard（bash 写目标经 `decideTarget` 命中配置写保护）
 
 #### Scenario: 不可靠 bash 命中 permission.json（无 grant）仍弹两档
 
 - **WHEN** bash 命令不可靠（如含 forwarder 或控制流，写目标未被可靠提取）且无 bash grant，命令字符串含 `permission.json` 路径 token（如 `sh -c 'echo x > <permission.json 路径>'`）
-- **THEN** 决策为 prompt tier=two，`declaration` 为 `"config_write"`（不可靠分支 tier=three prompt 之前做 L2 保护扫描）
+- **THEN** 决策为 deny_hard，`declaration` 为 `"config_write"`（不可靠分支 tier=three prompt 之前做 L2 保护扫描）
+
+#### Scenario: 不可靠 bash 有 grant 命中 permission.json 仍硬拒
+
+- **WHEN** bash 命令不可靠且存在 bash grant，命令字符串含 `permission.json` 路径 token
+- **THEN** 决策为 deny_hard（bash grant 不豁免配置写自保护，与 L1 运行时状态同级不可绕过）
+
+### Requirement: path-based deny 段检查
+
+决策引擎 SHALL 在 path 解析之前检查配置的 `deny` 段（path-based deny 规则，含 `!` 否定豁免）。检查顺序：
+
+1. **tool+pattern deny 规则检查**（既有 step 0，最高优先级）
+2. **path-based deny 段检查**（新增 step 0.5）：若 `resolveDenyPath(absPath)` 命中（正向命中且未命中任一 `!` 否定），决策为 `deny_hard`，不检查后续任何规则
+3. **path 解析**（既有 step 1，`paths` 表）
+4. ...（其余步骤不变）
+
+**deny-path 是无条件的**：不论路径是否敏感、不论区域、不论操作，deny-path 命中即硬拒绝（对齐 tool+pattern deny 的无条件语义）。
+
+**与 tool+pattern deny 的关系**：两者互补并存——tool+pattern deny 按工具/命令精确拦截（保持最高优先级），path-based deny 按路径泛拦；两者都在 path 解析之前，deny 优先于任何 permission 声明。
+
+**与 `sensitive.ts` hard 敏感的边界**：`!` 否定豁免**不作用于** `sensitive.ts` 硬编码 hard 敏感规则——`resolveDenyPath` 只判定用户配置的 `deny` 段；hard 敏感命中走敏感兜底分支（非 deny-path），其保护不可配豁免。
+
+#### Scenario: deny-path 命中判 deny_hard
+
+- **WHEN** 配置声明 `"deny": ["**/*.pem"]`，工具写 `<proj>/certs/root.pem`
+- **THEN** 决策为 `deny_hard`，`reasonCode` 为 `deny_path_hit`
+
+#### Scenario: deny-path 否定豁免不判 deny_hard
+
+- **WHEN** 配置声明 `"deny": ["**/*.pem", "!**/public.pem"]`，工具写 `<proj>/certs/public.pem`
+- **THEN** deny-path 未命中（`!` 豁免），继续后续规则判定（非 deny_hard）
+
+#### Scenario: deny-path 优先于 path 声明
+
+- **WHEN** 配置声明 `"deny": ["**/*.pem"]` 且 `"paths": { "**/*.pem": "read_write" }`，工具写 `<proj>/certs/root.pem`
+- **THEN** 决策为 `deny_hard`（deny-path 在 path 解析之前，优先于 permission 声明）
+
+#### Scenario: tool+pattern deny 优先于 deny-path
+
+- **WHEN** 配置声明 tool+pattern deny 规则 `{ "tool": "bash", "pattern": "rm *", "action": "deny" }` 且 `"deny": ["**/*"]`，bash 命令为 `rm -rf /x`
+- **THEN** 决策为 `deny_hard`，`reasonCode` 为 `rule_denied`（tool+pattern deny 在 step 0 最高优先级，先于 deny-path step 0.5）
+
+#### Scenario: 未配置 deny 段不触发 deny-path 检查
+
+- **WHEN** 配置不含 `deny` 字段，工具访问任意路径
+- **THEN** `resolveDenyPath` 恒返 false，deny-path 检查不命中，行为与引入前一致
+
+#### Scenario: deny-path 不论操作均硬拒
+
+- **WHEN** 配置声明 `"deny": ["**/*.pem"]`，工具读 `<proj>/certs/root.pem`（read 操作）
+- **THEN** 决策为 `deny_hard`（deny-path 无条件，不论操作类型）
+
+#### Scenario: deny-path 不论区域均硬拒
+
+- **WHEN** 配置声明 `"deny": ["**/*.pem"]`，工具写项目内 `<proj>/certs/root.pem` 与项目外 `/other/root.pem`
+- **THEN** 两者均决策为 `deny_hard`（deny-path 无条件，不论区域）

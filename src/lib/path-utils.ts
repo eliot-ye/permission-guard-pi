@@ -253,3 +253,69 @@ export function isDefaultTmpPath(absPath: string): boolean {
     normalized === "/var/tmp" || normalized.startsWith("/var/tmp/")
   );
 }
+
+// -------- deny-path glob matching (deny-path-negation-glob) --------
+//
+// Path-based deny segment semantics, aligned with ta-agent's approval-gate deny
+// layer (../ta-agent/packages/runtime/src/approval/glob.ts). Minimal glob subset:
+//   *   matches within one segment (no /)
+//   **  matches across segments (incl /)
+// Anything else is literal (regex metachars escaped).
+//
+// `!` prefix = negation exemption (order-independent exception-set semantics, NOT
+// gitignore last-match-wins): a path is denied iff it hits any positive pattern
+// AND hits no negation pattern. A pure-negation list denies nothing.
+
+/** deny-glob pattern → RegExp (`*`=single segment `[^/]*`, `**`=cross-segment `.*`). */
+export function globDenyToRegExp(pattern: string): RegExp {
+  const normalized = pattern.replace(/\\/g, "/");
+  let out = "^";
+  let i = 0;
+  while (i < normalized.length) {
+    const ch = normalized[i];
+    if (ch === "*") {
+      if (normalized[i + 1] === "*") {
+        i += 2;
+        // `**/` matches zero or more complete segments (incl. the separator) so
+        // `**/*.pem` matches both `a.pem` and `a/b/c.pem`. A trailing `**` (not
+        // followed by `/`) matches anything remaining.
+        if (normalized[i] === "/") {
+          out += "(?:.*/)?";
+          i += 1;
+        } else {
+          out += ".*";
+        }
+      } else {
+        out += "[^/]*";
+        i += 1;
+      }
+      continue;
+    }
+    if (/[.+^${}()|[\]\\?]/.test(ch)) {
+      out += "\\" + ch;
+    } else {
+      out += ch;
+    }
+    i += 1;
+  }
+  out += "$";
+  return new RegExp(out);
+}
+
+/**
+ * Whether `path` is denied by the deny pattern list (with `!` negation exemption).
+ * Order-independent: split positive / negation, deny iff (hits ≥1 positive) AND (hits 0 negation).
+ * Pure-negation list (no positive) denies nothing. Empty list denies nothing.
+ */
+export function isDenyHit(path: string, patterns: string[]): boolean {
+  const positive: string[] = [];
+  const negative: string[] = [];
+  for (const p of patterns) {
+    if (p.startsWith("!")) negative.push(p.slice(1));
+    else positive.push(p);
+  }
+  if (positive.length === 0) return false;
+  if (!positive.some((pat) => globDenyToRegExp(pat).test(path))) return false;
+  if (negative.some((pat) => globDenyToRegExp(pat).test(path))) return false;
+  return true;
+}

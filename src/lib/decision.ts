@@ -122,6 +122,23 @@ export function decide(opts: {
     }
   }
 
+  // 0.5. Path-based deny segment check (deny-path-negation-glob): user-configured
+  // `deny` path globs (with `!` negation exemption). Runs AFTER tool+pattern deny
+  // (step 0, highest priority) and BEFORE path resolution (step 1) so a deny-path
+  // hit is unconditional — it outranks any permission declaration. Unconditional:
+  // regardless of sensitivity/region/action.
+  if (policy.resolveDenyPath?.(absPath)) {
+    return {
+      kind: "deny_hard",
+      region,
+      declaration: "unconfigured",
+      configured: false,
+      reason: `Denied by deny-path segment: ${absPath}`,
+      reasonCode: "deny_path_hit",
+      denial: { reason: `Path is denied by a configured deny segment: ${absPath}` },
+    };
+  }
+
   // 1. If a table entry declares this path.
   const entry = policy.resolve(absPath);
 

@@ -49,7 +49,7 @@
 | `path` | 绝对路径 \| null | 目标路径（bash 命令可能为 null） |
 | `command` | 字符串 \| null | bash 命令原文（文件工具为 null）。当字符串长度 > 512 字符时，MUST 被截断为前 511 字符 + 尾部 `…`，并追加 `note: "command truncated"` |
 | `region` | `"project_inner" \| "project_outer"` | 区域判定 |
-| `declaration` | `"read_write" \| "read_only" \| "unread" \| "sensitive_default" \| "unconfigured" \| "config_write"` | 触发本次决策的声明类型（`config_write` 见 access-decision「配置写保护」要求） |
+| `declaration` | `"read_write" \| "read_only" \| "unread" \| "sensitive_default" \| "unconfigured" \| "config_write"` | 触发本次决策的声明类型（`config_write` 见 access-decision「配置写保护」要求——config-write-hard-deny 后仅出现于 deny_hard 路径） |
 | `permission` | `"read_write" \| "read_only" \| null` | 若已配置则记录权限级别 |
 | `toolCallId` | 字符串 | pi 分配的 tool call id |
 | `note` | 字符串 \| 缺省 | 附加说明（如"no UI, denied"、"unreliable bash extraction"、"command truncated"） |
@@ -69,8 +69,8 @@
 
 #### Scenario: 配置写弹窗记录字段完整
 
-- **WHEN** 用户拒绝一次 `declaration="config_write"` 弹窗（写 permission.json，见 access-decision「配置写保护」）
-- **THEN** 审计日志新增记录 `declaration="config_write"`、`permission=null`（配置写无已配置权限级别）
+- **WHEN** 工具写 `permission.json` 触发配置写自保护硬拒（见 access-decision「配置写保护」——config-write-hard-deny 后为 deny_hard，非弹窗）
+- **THEN** 审计日志新增 `event = "hard_deny"` 记录、`declaration="config_write"`、`permission=null`（配置写无已配置权限级别）、`authorization="presumed"`（系统决策）
 
 #### Scenario: command 字段超过 512 字符被截断并追加 note
 
@@ -179,9 +179,10 @@
 **grant_source 派生规则**（真人弹窗事件）：
 - 弹窗触发的 Decision.declaration 为 `read_write` 或 `read_only` → `grant_source === "config_declaration"`
 - 弹窗触发的 Decision.declaration 为 `sensitive_default` 或 `unconfigured` → `grant_source === "default"`
-- 弹窗触发的 Decision.declaration 为 `config_write` 且**非 bash 来源**（文件工具，见 access-decision「配置写保护」）→ `grant_source === "default"`（对齐 `promptGrantSource` 既有 fallthrough，`extensions/index.ts:199`）；bash 来源的 config_write 弹窗 → 按下方 bash 规则优先，`grant_source === "bash_grant_memory"`（`promptGrantSource` bash-first 分支，`extensions/index.ts:195`）
 - bash 命令授权事件（bashReason 存在）→ `grant_source === "bash_grant_memory"`（本次授权将写入 bash grant memory）
 - path-based 弹窗（非 bash）→ `grant_source` 缺省（真人授权事件本身不写入 path grant memory；写入的 grant 是新的，其 authorization 属性由本条审计记录的 `authorization: "by_person"` 语义表达）
+
+**注**：原 `config_write` 派生条目（非 bash → `default` / bash → `bash_grant_memory`）随 config-write-hard-deny 移除——config_write 不再走弹窗授权路径（已升级为 deny_hard），deny_hard 为系统决策（`authorization: "presumed"`，无 `grant_source`），不产生真人 `grant_source` 派生。
 
 #### Scenario: 真人"总是允许"选择落日志带 by_person
 
@@ -190,8 +191,8 @@
 
 #### Scenario: 配置写弹窗授权来源为 default
 
-- **WHEN** 用户对 `declaration="config_write"` 弹窗（写 permission.json）选"允许本会话"
-- **THEN** 审计日志 `event: "allow_session"`，`authorization: "by_person"`，`grant_source === "default"`
+- **WHEN** 工具写 `permission.json` 触发配置写自保护硬拒（config-write-hard-deny 后为 deny_hard，非弹窗授权）
+- **THEN** 审计日志 `event: "hard_deny"`，`authorization: "presumed"`，无 `grant_source`（系统决策非授权事件）
 
 #### Scenario: 真人"拒绝"选择也标 by_person
 
@@ -200,7 +201,7 @@
 
 #### Scenario: 系统硬拒绝标 presumed
 
-- **WHEN** 决策为 `deny_hard`（如 unread 命中）
+- **WHEN** 决策为 `deny_hard`（如 unread 命中 或 配置写自保护命中）
 - **THEN** 审计日志 `event: "hard_deny"`，`authorization: "presumed"`
 
 #### Scenario: auto_allow 从决策对象透传

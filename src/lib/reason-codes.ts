@@ -34,6 +34,7 @@ export type Lang = "en" | "zh";
 // branch in src/lib/decision.ts.
 export type DecisionReasonCode =
   | "rule_denied" // deny rule match (hard deny)
+  | "deny_path_hit" // path-based deny segment match (deny-path-negation-glob, hard deny)
   | "rule_allowed" // allow rule match (auto-allow non-sensitive)
   | "cross_source_unread_conflict" // unread-involved cross-source conflict
   | "path_unread_hard_deny" // config declared unread (hard deny)
@@ -124,8 +125,6 @@ export type UiCode =
   // Sensitive tier=two subtitle
   | "subtitle_sensitive_hard_not_persistable"
   | "subtitle_network_exfil_not_persistable"
-  // config-self-protect (L2): permission.json write/delete tier=two subtitle
-  | "subtitle_config_write_not_persistable"
   // permission-toggle (P3): /permission command + footer status marker
   | "permission_status_enabled"
   | "permission_status_disabled"
